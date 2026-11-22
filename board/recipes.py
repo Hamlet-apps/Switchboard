@@ -28,7 +28,8 @@ def _staff_cards(th, pv):
                 {'op': 'eq', 'value': '3', 'then': '10'},
                 {'op': 'gte', 'value': '4', 'then': '15'},
             ], 'else': '5'}},
-            'label': 'Meal card for ' + _tok(trigger, 'person.name'),
+            # In Pavilion the label is the card type's name, so one label for everyone.
+            'label': 'Volunteer meal card',
             'replace_previous': 'true',
         }},
     ]

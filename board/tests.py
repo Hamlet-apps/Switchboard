@@ -191,7 +191,7 @@ class EngineTests(Base):
         self.assertEqual(find['json'], {'email': 'maria@example.org'})
         self.assertEqual(find['headers']['Authorization'], 'Bearer sbk_test')
         self.assertNotIn('Idempotency-Key', find['headers'])
-        self.assertEqual(issue['json'], {'staff_id': '12', 'amount': 10.0, 'label': 'Meal card for Maria K.',
+        self.assertEqual(issue['json'], {'staff_id': '12', 'amount': 10.0, 'label': 'Volunteer meal card',
                                          'replace_previous': True})
         self.assertTrue(issue['headers']['Idempotency-Key'].startswith('sb_'))
         self.assertEqual([s.status for s in run.step_results.all()], ['ok', 'ok', 'ok', 'ok'])

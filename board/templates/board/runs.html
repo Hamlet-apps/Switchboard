@@ -1,0 +1,94 @@
+{% extends 'board/shell.html' %}
+{% block title %}Runs · Switchboard{% endblock %}
+{% block page %}
+<header class="page-head" style="align-items: flex-end">
+  <div class="titles">
+    <h1>Runs</h1>
+    <p>Every call that went through the switchboard</p>
+  </div>
+  <div class="stats" data-live>
+    <div class="stat">Today<b>{{ today_runs }} run{{ today_runs|pluralize }}</b></div>
+    <div class="stat">Failed today<b{% if today_failed %} class="bad"{% endif %}>{{ today_failed }}</b></div>
+  </div>
+</header>
+
+<form method="get" class="filters" id="run-filters">
+  <label class="select">
+    <span class="ms" aria-hidden="true">account_tree</span><span class="sr">Workflow</span>
+    <select name="workflow" data-autosubmit>
+      <option value="">All workflows</option>
+      {% for w in workflows %}<option value="{{ w.pk }}"{% if workflow and w.pk == workflow.pk %} selected{% endif %}>{{ w.name }}</option>{% endfor %}
+    </select>
+  </label>
+  {% if status != 'all' %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+  {% if tests %}<input type="hidden" name="tests" value="1">{% endif %}
+  <div class="segment" role="group" aria-label="Status">
+    {% for chip in chips %}<a href="{{ chip.url|default:'?' }}"{% if chip.on %} class="on" aria-current="true"{% endif %}>{{ chip.label }}</a>{% endfor %}
+  </div>
+  <label class="select">
+    <span class="ms" aria-hidden="true">calendar_today</span><span class="sr">When</span>
+    <select name="days" data-autosubmit>{% for r in ranges %}<option value="{{ r.value }}"{% if r.on %} selected{% endif %}>{{ r.label }}</option>{% endfor %}</select>
+  </label>
+  <a class="chip{% if tests %} on{% endif %}" href="{{ tests_link|default:'?' }}"><span class="ms" aria-hidden="true" style="font-size: 16px; opacity: 1">science</span>Show test runs</a>
+</form>
+
+<div class="runs-split">
+  <div class="card runs-table" data-live{% if live %} data-live-poll{% endif %}>
+    {% if rows %}
+    <table>
+      <thead><tr><th scope="col">Status</th><th scope="col">Workflow</th><th scope="col">Triggered by</th><th scope="col">Started</th><th scope="col">Took</th></tr></thead>
+      <tbody>
+        {% for run in rows %}
+        <tr class="row{% if selected and run.pk == selected.run.pk %} sel{% endif %}">
+          <td><a href="{{ row_link|default:'?' }}{% if row_link %}&{% endif %}run={{ run.pk }}"><span class="run-status is-{{ run.status }}"><span class="ms fill{% if run.status == 'running' %} spin{% endif %}" aria-hidden="true">{{ run.icon }}</span>{{ run.label }}</span></a></td>
+          <td class="wfname">{{ run.workflow.name }}{% if run.is_test %} <span class="pill test">Test</span>{% endif %}</td>
+          <td>{{ run.trigger_label }}</td>
+          <td style="white-space: nowrap">{% if run.when.date == today.date %}Today{% else %}{{ run.when|date:"D j M" }}{% endif %} {{ run.when|date:"H:i" }}</td>
+          <td class="mono" style="font-size: 13px">{{ run.took }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty" style="border: 0"><span class="ms" aria-hidden="true">history</span><strong>No runs here</strong>Runs show up as soon as a workflow's trigger fires. Try another filter, or test a workflow from its builder.</div>
+    {% endif %}
+  </div>
+
+  {% if selected %}
+  <aside class="card run-detail" aria-label="Selected run" data-live>
+    <header>
+      <div>
+        <span class="sub">Run #{{ selected.run.pk }} · {{ selected.run.created_at|date:"H:i" }}{% if selected.run.retries %} · retried{% if selected.run.retries > 1 %} {{ selected.run.retries }} times{% endif %}{% endif %}{% if selected.run.status == 'succeeded' or selected.run.status == 'failed' or selected.run.status == 'stopped' %} · {{ selected.took }}{% endif %}</span>
+        <h2>{{ selected.run.workflow.name }}</h2>
+      </div>
+      <span class="pill {{ selected.run.status }}">{{ selected.label }}</span>
+    </header>
+    <ol class="run-steps">
+      {% for step in selected.steps %}
+      <li class="is-{{ step.status }}">
+        <span class="ms fill is-{{ step.status }}" aria-hidden="true">{% if step.status == 'ok' %}check_circle{% elif step.status == 'failed' %}error{% elif step.status == 'stopped' %}do_not_disturb_on{% else %}radio_button_unchecked{% endif %}</span>
+        <div class="body">
+          <b>{{ step.title }}</b>
+          {% if step.note %}<small>{{ step.note }}</small>{% endif %}
+          {% if step.error %}<span class="err">{{ step.error }}</span>{% endif %}
+          {% if step.sent or step.output %}
+          <details class="peek"><summary>What went in and out</summary>
+            {% if step.sent %}<h4>Sent</h4><pre>{{ step.sent }}</pre>{% endif %}
+            {% if step.output %}<h4>{% if forloop.first %}Trigger data{% else %}Came back{% endif %}</h4><pre>{{ step.output }}</pre>{% endif %}
+          </details>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+    <div class="run-actions">
+      {% if selected.run.status == 'failed' %}
+      <form method="post" action="{% url 'run_retry' selected.run.pk %}">{% csrf_token %}<input type="hidden" name="back" value="{{ request.get_full_path }}">
+        <button type="submit" class="btn primary"><span class="ms" aria-hidden="true">replay</span>Retry from step {{ selected.retry_step }}</button></form>
+      {% endif %}
+      <a class="btn{% if selected.run.status == 'failed' %} icon{% endif %}" href="{% url 'builder' selected.run.workflow_id %}" aria-label="Open workflow in builder"><span class="ms" aria-hidden="true">open_in_new</span>{% if selected.run.status != 'failed' %}Open workflow{% endif %}</a>
+    </div>
+  </aside>
+  {% endif %}
+</div>
+{% endblock %}

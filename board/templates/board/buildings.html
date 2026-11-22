@@ -1,0 +1,63 @@
+{% extends 'board/shell.html' %}
+{% load board_tags %}
+{% block title %}Buildings · Switchboard{% endblock %}
+{% block page %}
+<header class="page-head">
+  <div class="titles">
+    <h1>Buildings</h1>
+    <p>The Hamlet buildings this switchboard has a line to</p>
+  </div>
+</header>
+
+<section class="connect" aria-label="Connect a building">
+  <div class="jacks" aria-hidden="true"><i></i><i class="lit"></i><i></i><i></i><i class="lit"></i><i></i><i></i><i></i><i></i><i class="lit"></i><i></i><i></i></div>
+  <div class="words">
+    <h2>Connect a building</h2>
+    <p>Type the address of your Town Hall, Pavilion or another Hamlet building. You'll approve the connection over there, and nobody has to copy keys.</p>
+    <ol>
+      <li>Switchboard asks the building what it can do.</li>
+      <li>You sign in to the building and approve.</li>
+      <li>Its events and actions appear in the workflow builder.</li>
+    </ol>
+  </div>
+  <form method="post" action="{% url 'building_connect' %}">
+    {% csrf_token %}
+    <input type="text" name="address" value="{{ address }}" placeholder="volunteers.example.org" aria-label="Building address" required inputmode="url" autocapitalize="off" spellcheck="false">
+    <button type="submit" class="btn"><span class="ms" aria-hidden="true">power</span>Connect</button>
+  </form>
+</section>
+
+<section class="section" aria-label="Connected buildings">
+  <h2 class="eyebrow">Connected</h2>
+  {% if cards %}
+  <div class="bld-grid">
+    {% for card in cards %}{% with c=card.connection %}
+    <article class="card bld">
+      <div class="bld-top">
+        {% include 'board/_tile.html' with tile=card.tile size='xl' %}
+        <div><h3>{{ c.name }}</h3><small>{% if c.instance %}{{ c.instance }} · {% endif %}{{ c.host }}</small></div>
+        {% if c.status == 'connected' %}<span class="pill ok"><span class="dot"></span>Connected</span>{% else %}<span class="pill broken"><span class="dot"></span>Needs reconnecting</span>{% endif %}
+      </div>
+      {% if c.status != 'connected' %}<p class="err">{{ c.last_error|default:"This building stopped accepting our key." }} Connect it again with the same address: your workflows keep working.</p>{% endif %}
+      <div class="bld-facts">
+        <div><b>{{ card.events_week }}</b>event{{ card.events_week|pluralize }} this week</div>
+        <div><b>{{ card.workflows|length }}</b>workflow{{ card.workflows|length|pluralize }} use it</div>
+        <div><b>{{ c.last_event_at|ago }}</b>{% if c.last_event_at %}was the last event{% else %}heard from yet{% endif %}</div>
+      </div>
+      <details><summary>{{ card.triggers|length }} event{{ card.triggers|length|pluralize }} it can start workflows with</summary>
+        <ul>{% for t in card.triggers %}<li><span class="ms" aria-hidden="true">bolt</span><span>{{ t.title|default:t.type }}</span><code>{{ t.type }}</code></li>{% endfor %}</ul></details>
+      <details><summary>{{ card.actions|length }} thing{{ card.actions|length|pluralize }} workflows can do there</summary>
+        <ul>{% for a in card.actions %}<li><span class="ms" aria-hidden="true">{% if a.kind == 'lookup' %}search{% else %}play_arrow{% endif %}</span><span>{{ a.title|default:a.name }}</span><code>{{ a.name }}</code></li>{% endfor %}</ul></details>
+      <div class="bld-actions">
+        <form method="post" action="{% url 'building_refresh' c.pk %}">{% csrf_token %}<button type="submit" class="btn small"><span class="ms" aria-hidden="true">sync</span>Check again</button></form>
+        {% if c.status != 'connected' %}<form method="post" action="{% url 'building_connect' %}">{% csrf_token %}<input type="hidden" name="address" value="{{ c.base_url }}"><button type="submit" class="btn small primary"><span class="ms" aria-hidden="true">power</span>Reconnect</button></form>{% endif %}
+        <form method="post" action="{% url 'building_disconnect' c.pk %}" data-confirm="Disconnect {{ c.name }}?{% if card.workflows %} {{ card.workflows|length }} workflow{{ card.workflows|length|pluralize }} that use it will stop working.{% endif %}">{% csrf_token %}<button type="submit" class="btn small danger"><span class="ms" aria-hidden="true">power_off</span>Disconnect</button></form>
+      </div>
+    </article>
+    {% endwith %}{% endfor %}
+  </div>
+  {% else %}
+  <div class="empty"><span class="ms" aria-hidden="true">power</span><strong>No lines yet</strong>Connect your first building above. Each one tells Switchboard which events it sends and what it can do.</div>
+  {% endif %}
+</section>
+{% endblock %}

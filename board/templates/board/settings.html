@@ -1,0 +1,54 @@
+{% extends 'board/shell.html' %}
+{% block title %}Settings · Switchboard{% endblock %}
+{% block page %}
+<header class="page-head"><div class="titles"><h1>Settings</h1><p>Your organization, secrets and who can sign in</p></div></header>
+<div class="set-grid">
+  <section class="card set" aria-label="Organization">
+    <h2>Organization</h2>
+    <form method="post" class="stack">{% csrf_token %}<input type="hidden" name="op" value="org">
+      <label class="field">Name<input type="text" name="org_name" value="{{ org.org_name }}" required><small>Buildings show this when you connect them.</small></label>
+      <label class="field">Time zone<input type="text" name="time_zone" value="{{ org.time_zone }}" list="zones" required><small>Schedules and times in the run log use this clock.</small></label>
+      <datalist id="zones">{% for zone in zones %}<option value="{{ zone }}">{% endfor %}</datalist>
+      <label class="field">Keep run history for<input type="number" name="keep_days" value="{{ org.keep_days }}" min="1" max="3650" required><small>Days. Older runs and events are deleted.</small></label>
+      <button type="submit" class="btn primary" style="align-self: flex-start">Save</button>
+    </form>
+  </section>
+
+  <section class="card set" aria-label="Secrets">
+    <h2>Secrets</h2>
+    <p>Keys and tokens for HTTP request steps, like a Telegram bot token. They're stored encrypted and never shown again.</p>
+    {% if secrets %}<ul class="rows">{% for secret in secrets %}
+      <li><span class="ms" aria-hidden="true" style="color: var(--mute)">key</span><code>{% templatetag openvariable %}secret.{{ secret.name }}{% templatetag closevariable %}</code>
+        <form method="post" data-confirm="Remove {{ secret.name }}? Steps using it will send an empty value.">{% csrf_token %}<input type="hidden" name="op" value="secret_delete"><input type="hidden" name="id" value="{{ secret.pk }}"><button class="btn small danger" type="submit">Remove</button></form></li>
+    {% endfor %}</ul>{% endif %}
+    <form method="post" class="row">{% csrf_token %}<input type="hidden" name="op" value="secret_add">
+      <label class="field">Name<input type="text" name="name" placeholder="TELEGRAM_BOT" required autocapitalize="characters" spellcheck="false"></label>
+      <label class="field">Value<input type="password" name="value" required autocomplete="off"></label>
+      <button type="submit" class="btn" style="height: 48px">Save secret</button>
+    </form>
+  </section>
+
+  <section class="card set" aria-label="People">
+    <h2>People</h2>
+    <p>Everyone here can build workflows, connect buildings and change these settings.</p>
+    <ul class="rows">{% for person in people %}
+      <li><span class="tile m" style="border-radius: 999px">{{ person.username|slice:":1"|upper }}</span>{{ person.username }}{% if person.pk == request.user.pk %} <span class="hint">(you)</span>{% else %}
+        <form method="post" data-confirm="Remove {{ person.username }}?">{% csrf_token %}<input type="hidden" name="op" value="user_remove"><input type="hidden" name="id" value="{{ person.pk }}"><button class="btn small danger" type="submit">Remove</button></form>{% endif %}</li>
+    {% endfor %}</ul>
+    <form method="post" class="row">{% csrf_token %}<input type="hidden" name="op" value="user_add">
+      <label class="field">Username<input type="text" name="username" required autocomplete="off"></label>
+      <label class="field">First password<input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+      <button type="submit" class="btn" style="height: 48px">Add person</button>
+    </form>
+  </section>
+
+  <section class="card set" aria-label="Your password">
+    <h2>Your password</h2>
+    <form method="post" class="stack">{% csrf_token %}<input type="hidden" name="op" value="password">
+      <label class="field">Current password<input type="password" name="current" required autocomplete="current-password"></label>
+      <label class="field">New password<input type="password" name="password" minlength="8" required autocomplete="new-password"><small>At least 8 characters.</small></label>
+      <button type="submit" class="btn" style="align-self: flex-start">Change password</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

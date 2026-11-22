@@ -1,0 +1,125 @@
+{% extends 'board/shell.html' %}
+{% load board_tags %}
+{% block title %}{% if folder %}{{ folder.name }} · {% endif %}Workflows · Switchboard{% endblock %}
+{% block page %}
+<header class="page-head">
+  <div class="titles">
+    {% if folder %}<a class="crumb" href="{% url 'workflows' %}"><span class="ms" aria-hidden="true">arrow_back</span>All workflows</a>{% endif %}
+    <h1>{% if folder %}{{ folder.name }}{% else %}Workflows{% endif %}</h1>
+    <p>{% if folder %}{{ in_folder }} workflow{{ in_folder|pluralize }} in this folder{% else %}{{ total }} workflow{{ total|pluralize }} · {{ running }} running{% endif %}</p>
+  </div>
+  <form method="get" class="search" role="search" style="width: 260px; max-width: 100%">
+    {% if folder %}<input type="hidden" name="folder" value="{{ folder.pk }}">{% endif %}
+    <span class="ms" aria-hidden="true">search</span>
+    <input type="search" name="q" value="{{ query }}" placeholder="Search workflows" aria-label="Search workflows">
+  </form>
+  {% if folder %}
+  <details class="menu">
+    <summary class="btn"><span class="ms" aria-hidden="true">folder_managed</span>Folder</summary>
+    <div class="menu-pop">
+      <span class="eyebrow label">Rename</span>
+      <form method="post" action="{% url 'folder_rename' folder.pk %}" class="menu-form" style="display: flex">{% csrf_token %}<input type="text" name="name" value="{{ folder.name }}" aria-label="Folder name" required><button class="btn small primary" type="submit" style="width: auto">Save</button></form>
+      <hr>
+      <form method="post" action="{% url 'folder_delete' folder.pk %}" data-confirm="Remove this folder? Its workflows stay.">{% csrf_token %}<button type="submit" class="danger"><span class="ms" aria-hidden="true">delete</span>Remove folder</button></form>
+    </div>
+  </details>
+  {% else %}
+  <details class="menu">
+    <summary class="btn"><span class="ms" aria-hidden="true">create_new_folder</span>New folder</summary>
+    <div class="menu-pop">
+      <form method="post" action="{% url 'folder_new' %}" class="menu-form" style="display: flex">{% csrf_token %}<input type="text" name="name" placeholder="Folder name" aria-label="Folder name" required><button class="btn small primary" type="submit" style="width: auto">Add</button></form>
+    </div>
+  </details>
+  {% endif %}
+  <form method="post" action="{% url 'workflow_new' %}">{% csrf_token %}{% if folder %}<input type="hidden" name="folder" value="{{ folder.pk }}">{% endif %}
+    <button type="submit" class="btn primary"><span class="ms" aria-hidden="true">add</span>New workflow</button></form>
+</header>
+
+{% if not folder and folders %}
+<section class="section" aria-label="Folders">
+  <h2 class="eyebrow">Folders</h2>
+  <div class="folder-grid">
+    {% for item in folders %}
+    <a class="folder tint-{{ item.folder.tint }}" href="?folder={{ item.folder.pk }}">
+      <span class="tile"><span class="ms" aria-hidden="true">folder</span></span>
+      <span><b>{{ item.folder.name }}</b><small>{% if item.count %}{{ item.count }} workflow{{ item.count|pluralize }}{% else %}Empty{% endif %}</small></span>
+      <span class="ms" aria-hidden="true">chevron_right</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="section" aria-label="{% if folder %}Workflows in this folder{% else %}All workflows{% endif %}">
+  <div class="section-head">
+    <h2 class="eyebrow">{% if folder %}In this folder{% else %}All workflows{% endif %}</h2>
+    {% for chip in chips %}<a class="chip{% if chip.on %} on{% endif %}" {% if chip.on %}aria-current="true" {% endif %}href="?{% if folder %}folder={{ folder.pk }}&{% endif %}{% if chip.key != 'all' %}status={{ chip.key }}&{% endif %}{% if query %}q={{ query|urlencode }}{% endif %}">{{ chip.label }} <span>{{ chip.count }}</span></a>{% endfor %}
+  </div>
+  {% if cards %}
+  <div class="wf-grid">
+    {% for card in cards %}
+    <article class="card wf">
+      <div class="wf-top">
+        <div class="wf-tiles">{% for tile in card.tiles %}{% include 'board/_tile.html' with tile=tile size='' %}{% empty %}<span class="tile ghost"><span class="ms" aria-hidden="true">add</span></span>{% endfor %}</div>
+        <span class="pill {{ card.state }}"><span class="dot"></span>{{ card.state_label }}</span>
+        <details class="menu wf-more">
+          <summary aria-label="More actions for {{ card.workflow.name }}"><span class="ms" aria-hidden="true">more_horiz</span></summary>
+          <div class="menu-pop">
+            <form method="post" action="{% url 'workflow_duplicate' card.workflow.pk %}">{% csrf_token %}<button type="submit"><span class="ms" aria-hidden="true">content_copy</span>Duplicate</button></form>
+            {% if folders %}<hr><span class="eyebrow label">Move to</span>
+            <form method="post" action="{% url 'workflow_move' card.workflow.pk %}">{% csrf_token %}<input type="hidden" name="back" value="{{ request.get_full_path }}">
+              {% for item in folders %}{% if item.folder.pk != card.workflow.folder_id %}<button type="submit" name="folder" value="{{ item.folder.pk }}"><span class="ms" aria-hidden="true">folder</span>{{ item.folder.name }}</button>{% endif %}{% endfor %}
+              {% if card.workflow.folder_id %}<button type="submit" name="folder" value=""><span class="ms" aria-hidden="true">folder_off</span>No folder</button>{% endif %}
+            </form>{% endif %}
+            <hr>
+            <form method="post" action="{% url 'workflow_delete' card.workflow.pk %}" data-confirm="Delete “{{ card.workflow.name }}” and its run history?">{% csrf_token %}<button type="submit" class="danger"><span class="ms" aria-hidden="true">delete</span>Delete</button></form>
+          </div>
+        </details>
+      </div>
+      <div>
+        <h3><a href="{% url 'builder' card.workflow.pk %}">{{ card.workflow.name }}</a></h3>
+        <p>{{ card.workflow.description|default:"No description yet." }}</p>
+      </div>
+      <div class="wf-foot">
+        <div class="strip" role="img" aria-label="Last 16 runs">{% for mark in card.strip %}<span class="{{ mark }}"></span>{% endfor %}</div>
+        <div class="wf-meta">
+          <span><span class="ms" aria-hidden="true">steps</span>{{ card.steps }} step{{ card.steps|pluralize }}</span>
+          <span><span class="ms" aria-hidden="true">bolt</span>{{ card.total }} run{{ card.total|pluralize }}</span>
+          <span class="last"><span class="ms" aria-hidden="true">schedule</span>{{ card.last|ago }}</span>
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    <span class="ms" aria-hidden="true">account_tree</span>
+    {% if query or status != 'all' %}<strong>Nothing matches</strong>Try another search or filter.
+    {% elif has_buildings %}<strong>No workflows yet</strong>Start one from scratch, or switch on a recipe below.
+    {% else %}<strong>Connect a building first</strong>Workflows carry calls between your Hamlet buildings, so Switchboard needs at least one.
+    <a class="btn primary" href="{% url 'buildings' %}"><span class="ms" aria-hidden="true">power</span>Connect a building</a>{% endif %}
+  </div>
+  {% endif %}
+</section>
+
+{% if not folder and not query %}
+<section class="section" aria-label="Recipes">
+  <h2 class="eyebrow">Recipes</h2>
+  <div class="recipes">
+    {% for recipe in recipes %}
+    <article class="recipe">
+      <div class="wf-tiles">{% for tile in recipe.tiles %}{% include 'board/_tile.html' with tile=tile size='' %}{% endfor %}</div>
+      <h3>{{ recipe.name }}</h3>
+      <p>{{ recipe.description }}</p>
+      <small><span class="ms" aria-hidden="true" style="font-size: 16px">edit_note</span>You fill in: {{ recipe.fill_in }}</small>
+      {% if recipe.ready %}
+      <form method="post" action="{% url 'workflow_new' %}">{% csrf_token %}<input type="hidden" name="recipe" value="{{ recipe.id }}"><button type="submit" class="btn"><span class="ms" aria-hidden="true">add</span>Use this recipe</button></form>
+      {% else %}
+      <a class="btn wait" href="{% url 'buildings' %}"><span class="ms" aria-hidden="true">power</span>Connect {{ recipe.missing|join:" and " }} first</a>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

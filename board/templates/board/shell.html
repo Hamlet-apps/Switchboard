@@ -1,0 +1,24 @@
+{% extends 'board/base.html' %}
+{% block body %}
+<div class="shell">
+  <nav class="rail" aria-label="Switchboard">
+    <a href="{% url 'workflows' %}" class="mark" aria-label="Switchboard home">{% include 'board/_mark.html' %}</a>
+    <div class="rail-nav">
+      <a href="{% url 'workflows' %}" class="rail-item"{% if nav == 'workflows' %} aria-current="page"{% endif %}><span class="ms" aria-hidden="true">account_tree</span>Workflows</a>
+      <a href="{% url 'runs' %}" class="rail-item"{% if nav == 'runs' %} aria-current="page"{% endif %}><span class="ms" aria-hidden="true">history</span>Runs</a>
+      <a href="{% url 'buildings' %}" class="rail-item"{% if nav == 'buildings' %} aria-current="page"{% endif %}><span class="ms" aria-hidden="true">power</span>Buildings</a>
+    </div>
+    <div class="rail-foot">
+      <a href="{% url 'settings' %}" class="rail-item"{% if nav == 'settings' %} aria-current="page"{% endif %}><span class="ms" aria-hidden="true">tune</span>Settings</a>
+      <details class="me">
+        <summary aria-label="Signed in as {{ me_name }}">{{ me_initial }}</summary>
+        <div class="me-menu">
+          <span>Signed in as <b>{{ me_name }}</b>{% if org.org_name %}<br>{{ org.org_name }}{% endif %}</span>
+          <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="btn small" type="submit"><span class="ms" aria-hidden="true">logout</span>Sign out</button></form>
+        </div>
+      </details>
+    </div>
+  </nav>
+  <main class="page">{% block page %}{% endblock %}</main>
+</div>
+{% endblock %}

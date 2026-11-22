@@ -1,0 +1,24 @@
+{% extends 'board/base.html' %}
+{% block title %}Sign in · Switchboard{% endblock %}
+{% block body %}
+<div class="gate">
+  {% include 'board/_gate_art.html' %}
+  <main class="gate-form">
+    <div>
+      <div>
+        <h2>Sign in</h2>
+        <p class="lead">Use your Switchboard login{% if org.org_name %} for {{ org.org_name }}{% endif %}.</p>
+      </div>
+      {% if error %}<p class="form-error" role="alert"><span class="ms" aria-hidden="true">error</span>{{ error }}</p>{% endif %}
+      <form method="post">
+        {% csrf_token %}<input type="hidden" name="next" value="{{ next }}">
+        <label class="field">Username<input type="text" name="username" value="{{ username }}" autocomplete="username" required autofocus></label>
+        <label class="field">Password<input type="password" name="password" autocomplete="current-password" required></label>
+        <button type="submit" class="btn primary">Sign in<span class="ms" aria-hidden="true">arrow_forward</span></button>
+      </form>
+      <p class="hint">Forgot it? Another person with a login can set a new password for you in Settings.</p>
+      <p class="gate-foot"><span class="ms" aria-hidden="true">dns</span>Self-hosted at {{ host }}</p>
+    </div>
+  </main>
+</div>
+{% endblock %}

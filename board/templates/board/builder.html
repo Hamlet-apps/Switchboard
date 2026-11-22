@@ -1,0 +1,58 @@
+{% extends 'board/base.html' %}
+{% load static %}
+{% block title %}{{ workflow.name }} · Switchboard{% endblock %}
+{% block body_class %}b-body{% endblock %}
+{% block body %}
+<header class="b-head">
+  <a class="back" href="{{ back }}" aria-label="Back to workflows"><span class="ms" aria-hidden="true">arrow_back</span></a>
+  <span class="mark">{% include 'board/_mark.html' %}</span>
+  <details class="menu">
+    <summary class="folder-name">{% if workflow.folder %}{{ workflow.folder.name }}{% else %}All workflows{% endif %}</summary>
+    <div class="menu-pop" style="left: 0; right: auto">
+      <span class="eyebrow label">Move to</span>
+      <form method="post" action="{% url 'workflow_move' workflow.pk %}">{% csrf_token %}<input type="hidden" name="back" value="{{ request.path }}">
+        {% for folder in folders %}{% if folder.pk != workflow.folder_id %}<button type="submit" name="folder" value="{{ folder.pk }}"><span class="ms" aria-hidden="true">folder</span>{{ folder.name }}</button>{% endif %}{% endfor %}
+        {% if workflow.folder_id %}<button type="submit" name="folder" value=""><span class="ms" aria-hidden="true">folder_off</span>No folder</button>{% endif %}
+        {% if not folders %}<span class="hint" style="padding: 4px 10px 8px">Make folders on the Workflows page.</span>{% endif %}
+      </form>
+    </div>
+  </details>
+  <span class="ms sep" aria-hidden="true">chevron_right</span>
+  <input class="b-name" id="wf-name" value="{{ workflow.name }}" aria-label="Workflow name" maxlength="120">
+  <nav class="b-tabs" aria-label="Workflow views">
+    <span class="on" aria-current="page">Editor</span>
+    <a href="{% url 'runs' %}?workflow={{ workflow.pk }}">Runs{% if run_count %} · {{ run_count }}{% endif %}</a>
+  </nav>
+  <button type="button" class="b-switch" id="wf-switch" role="switch" aria-checked="{{ workflow.enabled|yesno:'true,false' }}"><i></i><span>{% if workflow.enabled %}Running{% else %}Paused{% endif %}</span></button>
+  <form method="post" action="{% url 'workflow_run' workflow.pk %}" id="run-now" hidden>{% csrf_token %}<button type="submit" class="btn line"><span class="ms" aria-hidden="true">play_arrow</span>Run now</button></form>
+  <button type="button" class="btn line" id="wf-test"><span class="ms" aria-hidden="true">science</span><span>Test workflow</span></button>
+  <button type="button" class="btn primary" id="wf-save"><span class="dirty" hidden></span>Save</button>
+</header>
+{% if missed %}
+<div class="b-banner">
+  <span class="ms" aria-hidden="true">phone_missed</span>
+  {{ missed }} call{{ missed|pluralize }} came in while this was paused.
+  <form method="post" action="{% url 'workflow_replay' workflow.pk %}">{% csrf_token %}
+    <button type="submit" class="btn small primary">Switch on and put {{ missed|pluralize:"it,them" }} through</button>
+    <button type="submit" name="drop" value="1" class="btn small">Drop {{ missed|pluralize:"it,them" }}</button>
+  </form>
+</div>
+{% endif %}
+<div class="b-main">
+  <main class="canvas" id="canvas" aria-label="Workflow canvas">
+    <div class="flow" id="flow"></div>
+    <div class="zoom">
+      <button type="button" id="zoom-out" aria-label="Zoom out"><span class="ms" aria-hidden="true">remove</span></button>
+      <span id="zoom-label">100%</span>
+      <button type="button" id="zoom-in" aria-label="Zoom in"><span class="ms" aria-hidden="true">add</span></button>
+      <button type="button" id="zoom-fit" aria-label="Back to the start"><span class="ms" aria-hidden="true">fit_screen</span></button>
+    </div>
+    <div class="tip" id="tip"><span class="ms" aria-hidden="true">touch_app</span>Click a step to open it</div>
+  </main>
+  <aside class="picker" id="picker" hidden aria-label="Choose a step"></aside>
+  <div class="veil" id="veil" hidden></div>
+</div>
+{{ data|json_script:"builder-data" }}
+<input type="hidden" id="csrf" value="{{ csrf_token }}">
+{% endblock %}
+{% block scripts %}<script src="{% static 'board/builder.js' %}"></script>{% endblock %}

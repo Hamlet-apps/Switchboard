@@ -1,0 +1,28 @@
+{% extends 'board/base.html' %}
+{% block title %}Set up Switchboard{% endblock %}
+{% block body %}
+<div class="gate">
+  {% include 'board/_gate_art.html' %}
+  <main class="gate-form">
+    <div>
+      <div>
+        <h2>Set up Switchboard</h2>
+        <p class="lead">Nobody has a login here yet. Name your organization and make the first one.</p>
+      </div>
+      {% if error %}<p class="form-error" role="alert"><span class="ms" aria-hidden="true">error</span>{{ error }}</p>{% endif %}
+      <form method="post">
+        {% csrf_token %}
+        <label class="field">Organization<input type="text" name="org_name" value="{{ values.org_name }}" required autofocus><small>Buildings show this name when you connect them.</small></label>
+        <label class="field">Time zone<input type="text" name="time_zone" value="{{ values.time_zone }}" id="tz"><small>Schedules run on this clock. For example America/Vancouver.</small></label>
+        <label class="field">Your username<input type="text" name="username" value="{{ values.username }}" autocomplete="username" required></label>
+        <label class="field">Password<input type="password" name="password" autocomplete="new-password" minlength="8" required><small>At least 8 characters.</small></label>
+        <button type="submit" class="btn primary">Start<span class="ms" aria-hidden="true">arrow_forward</span></button>
+      </form>
+      <p class="gate-foot"><span class="ms" aria-hidden="true">dns</span>Self-hosted at {{ host }}</p>
+    </div>
+  </main>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+(function () { var tz = document.getElementById('tz'); try { if (tz.value === 'UTC') tz.value = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) {} })();
+</script>{% endblock %}

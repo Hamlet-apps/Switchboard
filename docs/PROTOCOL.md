@@ -202,13 +202,24 @@ Actions: `person.find` (lookup, by `email` → `found`, `person_id`, `name`, `em
 
 ### Pavilion (`pavilion`)
 
-Triggers: `order.placed` (`order.id`, `order.number`, `order.type`, `order.total`,
-`order.items` (count), `customer.name`, `customer.email`), `order.ready`,
-`staff.clocked_in`, `staff.clocked_out` (`staff.id|name|email`, `at`, `hours` on clock-out).
+Triggers: `order.placed` and `order.ready` (`order.id`, `order.number`, `order.type`,
+`order.channel`, `order.total`, `order.items` (count), `customer.name`, `customer.email`),
+`staff.clocked_in`, `staff.clocked_out` (`staff.id|name|email`, `at`, `role`, and `hours` on
+clock-out).
 
-Actions: `staff.find` (lookup, by `email` → `found`, `staff_id`, `name`, `email`, `roles`),
-`staff.ensure` (action: `name`, `email`, optional `role` → `staff_id`, `created`; makes a
-staff account when there isn't one for that email), `staff_card.issue` (action: `staff_id`,
-`amount`, optional `label`, optional `replace_previous` bool → `card_id`, `amount`, `label`,
-`replaced`), `shift.add` (action: `staff_id`, `starts_at`, `ends_at`, optional `role` →
-`shift_id`, `status`).
+Actions: `staff.find` (lookup, by `email` → `found`, `staff_id`, `name`, `email`, `roles`
+(names joined with ", "), `active`), `staff.ensure` (action: `name`, `email`, optional `role`,
+optional `invite` → `staff_id`, `created`; makes a staff account when there isn't one for
+that email), `staff_card.issue` (action: `staff_id`, `amount`, optional `label`, optional
+`replace_previous` bool → `card_id`, `amount`, `label`, `replaced`; **the label is the card
+type's name** on Pavilion's Staff cards page, so use one label for everyone rather than one
+per person), `shift.add` (action: `staff_id`, `starts_at`, `ends_at`, optional `role`,
+optional `note` → `shift_id`, `status`, `created`; a shift can't run past midnight).
+
+## 6. Notes from the first two buildings
+
+- A building that is being asked too fast answers `503` with `Retry-After`, not `429`,
+  because Switchboard retries 5xx and never 4xx.
+- Disconnecting on the building's side doesn't call Switchboard. Switchboard finds out from
+  the `401` on its next call and shows the connection as needing to be reconnected.
+- Idempotency records also keep 4xx answers, so a repeated key gets the same refusal.

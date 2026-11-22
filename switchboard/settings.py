@@ -99,6 +99,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
 ]
 
+# Own cookie names: buildings on the same host (another port, in development) would otherwise
+# overwrite our session during the connect handshake.
+SESSION_COOKIE_NAME = 'switchboard_session'
+CSRF_COOKIE_NAME = 'switchboard_csrf'
+
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'workflows'
 

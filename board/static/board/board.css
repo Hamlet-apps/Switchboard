@@ -294,7 +294,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .b-banner { background: var(--rose-soft); color: #8f0c3c; padding: 10px 16px; font-size: 14px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; flex: none; }
 .b-banner form { display: flex; gap: 8px; margin-left: auto; }
 .b-main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
-.canvas { flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden; background-color: var(--bg); background-image: radial-gradient(#d6cbe4 1.2px, transparent 1.2px); background-size: 22px 22px; cursor: grab; touch-action: none; }
+.canvas { flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden; background-color: var(--bg); background-image: radial-gradient(#d6cbe4 1.2px, transparent 1.2px); background-size: 22px 22px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
 .canvas.panning { cursor: grabbing; }
 .flow { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
 .node { width: 360px; background: #fff; border: 1px solid var(--line-2); border-radius: 16px; box-shadow: 0 1px 2px rgba(27,16,48,.05), 0 8px 24px rgba(27,16,48,.07); text-align: left; padding: 0; overflow: hidden; color: var(--ink); cursor: pointer; transition: box-shadow .16s; display: block; }
@@ -322,7 +322,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .zoom { position: absolute; left: 20px; bottom: 20px; display: flex; gap: 2px; padding: 4px; border-radius: 12px; background: #fff; border: 1px solid var(--line-2); box-shadow: 0 2px 8px rgba(27,16,48,.06); z-index: 3; }
 .zoom button { width: 36px; height: 36px; border-radius: 8px; border: 0; background: transparent; color: var(--ink-2); display: flex; align-items: center; justify-content: center; }
 .zoom button:hover { background: var(--soft); } .zoom span { min-width: 48px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--ink-2); }
-.tip { position: absolute; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 12px; background: var(--night); color: #fff; font-size: 13px; box-shadow: 0 8px 24px rgba(27,16,48,.2); z-index: 3; }
+.tip { position: absolute; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 12px; background: var(--night); color: #fff; font-size: 13px; box-shadow: 0 8px 24px rgba(27,16,48,.2); z-index: 3; pointer-events: none; }
 .tip .ms { font-size: 18px; color: var(--pink); }
 /* picker */
 .picker { flex: 0 0 420px; max-width: 100%; background: #fff; border-left: 1px solid var(--line-2); box-shadow: -12px 0 32px rgba(27,16,48,.06); display: flex; flex-direction: column; min-height: 0; z-index: 4; }

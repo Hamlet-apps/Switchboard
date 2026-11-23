@@ -942,7 +942,8 @@
       inPane.appendChild(h('p', null, icon('drag_pan'), 'Drag a field into a setting, or click it to add it where your cursor is'));
       var groups = h('div', { class: 'groups' });
       if (!path.length) groups.appendChild(h('p', { class: 'hint', style: 'font-size: 14px; padding: 4px 6px', text: 'Nothing leads into this step yet. Connect a wire to it and the fields that flow in will show up here.' }));
-      path.forEach(function (prev) {
+      // Nearest step first: the one just before this step is the one you most often want.
+      path.slice().reverse().forEach(function (prev) {
         var pdef = defOf(prev), info = fieldsOf(prev);
         groups.appendChild(h('div', { class: 'group' },
           h('div', { class: 'group-head' }, tile(pdef.tile, 's'), h('span', { text: pdef.title }), info.real ? null : h('small', { text: 'sample data' })),

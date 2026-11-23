@@ -1,4 +1,5 @@
 """The workflow builder: one page, plus the JSON calls its script makes."""
+import datetime
 import json
 import re
 import time
@@ -15,7 +16,7 @@ from django.views.decorators.http import require_POST
 
 from .. import engine, nodes, worker
 from ..buildings import BuildingError
-from ..models import Connection, Folder, Run, Secret, Settings, Workflow
+from ..models import Connection, Event, Folder, Run, Secret, Settings, Workflow
 from ..templating import MAP_OPS
 
 UID = re.compile(r'^[A-Za-z0-9_]{1,24}$')
@@ -156,11 +157,13 @@ def builder(request, pk):
         'workflow': {'id': workflow.pk, 'name': workflow.name, 'description': workflow.description,
                      'enabled': workflow.enabled, 'steps': nodes.upgrade(workflow.steps)},
         'catalog': catalog, 'defs': defs, 'missing': missing, 'samples': workflow.samples,
-        'hookUrl': hook, 'secrets': [s.name for s in Secret.objects.all()],
+        'hookUrl': hook,
+        'testHookUrl': request.build_absolute_uri(reverse('workflow_hook_test', args=[workflow.hook_token])),
+        'secrets': [s.name for s in Secret.objects.all()],
         'mapOps': [{'value': v, 'label': l} for v, l in MAP_OPS],
         'problems': nodes.problems(workflow.steps, by_id) if workflow.steps else [],
         'urls': {name: reverse(f'workflow_{name}', args=[workflow.pk])
-                 for name in ('save', 'toggle', 'test', 'test_step', 'run')},
+                 for name in ('save', 'toggle', 'test', 'test_step', 'listen', 'run')},
         'buildingsUrl': reverse('buildings'),
         'openPicker': not workflow.steps,
     }
@@ -234,6 +237,69 @@ def workflow_test_step(request, workflow, body):
     Workflow.objects.filter(pk=workflow.pk).update(samples={**workflow.samples, step['uid']: output})
     result['ms'] = int((time.monotonic() - began) * 1000)
     return JsonResponse(result)
+
+
+# How long the webhook's test URL stays open after the builder last asked. The builder asks
+# every 2 s, so this only matters once it stops (closed tab, lost connection).
+TEST_URL_GRACE = datetime.timedelta(seconds=30)
+
+
+@json_call
+def workflow_listen(request, workflow, body):
+    """Wait for the trigger to really fire ("Test this step" on a building or webhook trigger).
+
+    The builder calls this every few seconds until something comes in, and that becomes the
+    trigger's sample. Nothing runs.
+
+    - A building's event: buildings send every event and each one is stored, so this looks for
+      one of the trigger's type from its building that is newer than `after`. The first call
+      (no `after`) answers with where to look from.
+    - A webhook: the test URL answers only while this keeps being called, and leaves the call it
+      caught in `Workflow.test_call`. `{"stop": true}` closes the test URL.
+    """
+    steps = clean_steps(body.get('steps'))
+    step = nodes.find(steps, body.get('uid'))
+    if step is None or not steps or steps[0] is not step or step['node'] not in ('event', 'webhook'):
+        return JsonResponse({'ok': False, 'error': 'Only a trigger from a building or a webhook can listen.'}, status=400)
+    if step['node'] == 'webhook':
+        return _listen_webhook(workflow, step, body)
+    connection = _connections().get(step['connection'])
+    if connection is None or connection.status == Connection.PENDING:
+        return JsonResponse({'ok': False, 'error': 'This building is no longer connected. Reconnect it in Buildings, then try again.'})
+    if connection.status == Connection.BROKEN:
+        return JsonResponse({'ok': False, 'error': f'{connection.name} refused our key, so its events can’t reach Switchboard. Reconnect it in Buildings, then try again.'})
+    after = body.get('after')
+    if not isinstance(after, int):
+        latest = Event.objects.order_by('-pk').values_list('pk', flat=True).first()
+        return JsonResponse({'ok': True, 'listening': True, 'after': latest or 0})
+    event = (Event.objects.filter(connection=connection, type=step['key'], pk__gt=after)
+             .order_by('pk').first())
+    if event is None:
+        return JsonResponse({'ok': True, 'listening': True, 'after': after})
+    output = event.payload.get('data') if isinstance(event.payload.get('data'), dict) else {}
+    return _heard(workflow, step, output, event.summary, event.received_at)
+
+
+def _listen_webhook(workflow, step, body):
+    mine = Workflow.objects.filter(pk=workflow.pk)
+    if body.get('stop'):
+        mine.update(test_until=None, test_call=None)
+        return JsonResponse({'ok': True, 'listening': False})
+    if not isinstance(body.get('after'), int):          # starting: forget any call from before
+        mine.update(test_until=timezone.now() + TEST_URL_GRACE, test_call=None)
+        return JsonResponse({'ok': True, 'listening': True, 'after': 0})
+    call = workflow.test_call
+    if isinstance(call, dict) and mine.filter(test_call__isnull=False).update(test_call=None):
+        return _heard(workflow, step, call, 'Call to the test URL', timezone.now())
+    mine.update(test_until=timezone.now() + TEST_URL_GRACE)
+    return JsonResponse({'ok': True, 'listening': True, 'after': 0})
+
+
+def _heard(workflow, step, output, what, when):
+    """The trigger really fired while the builder listened: keep it as the sample."""
+    Workflow.objects.filter(pk=workflow.pk).update(samples={**workflow.samples, step['uid']: output})
+    at = timezone.localtime(when).strftime('%H:%M:%S')
+    return JsonResponse({'ok': True, 'output': output, 'real': True, 'heard': what, 'at': at})
 
 
 @json_call

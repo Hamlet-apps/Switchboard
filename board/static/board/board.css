@@ -383,7 +383,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .token.secret { background: var(--soft-2); color: var(--ink-2); } .token.lost { background: #fde7c8; color: #7a4b06; }
 .param select, .param input[type=time] { height: 48px; border-radius: 14px; border: 1px solid var(--line-3); background: #fff; padding: 0 12px; font-size: 14px; color: var(--ink); width: 100%; }
 .param select:focus, .param input[type=time]:focus { outline: 0; border: 2px solid var(--rose); }
-.param .help { font-size: 12px; color: var(--ink-3); line-height: 1.5; } .param .help.pinkish { font-weight: 600; color: var(--rose-ink); }
+.param .help, .params > .help { font-size: 12px; color: var(--ink-3); line-height: 1.5; } .param .help.pinkish { font-weight: 600; color: var(--rose-ink); }
 .toggle { display: flex; align-items: center; gap: 12px; font-size: 14px; background: none; border: 0; padding: 0; color: var(--ink); text-align: left; }
 .toggle i { width: 40px; height: 24px; border-radius: 999px; background: #c9bddb; position: relative; flex: none; transition: background-color .2s; }
 .toggle i::after { content: ''; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left .2s; }
@@ -407,6 +407,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .out-empty { margin: 24px 18px; padding: 24px; border-radius: 16px; border: 1.5px dashed var(--night-line); display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; color: var(--lilac-2); font-size: 14px; line-height: 1.5; }
 .out-empty > .ms { font-size: 32px; color: #6f6288; }
 .out-empty .btn { height: 40px; border: 0; background: var(--pink); color: var(--night); font-weight: 700; }
+.pane.out .pill.listen { background: rgba(255,79,139,.16); color: #ff9fc0; }
+.out-listen { margin: 24px 18px; padding: 28px 24px; border-radius: 16px; border: 1.5px dashed rgba(255,79,139,.45); display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; color: var(--lilac-2); font-size: 14px; line-height: 1.5; }
+.out-listen strong { color: #e9e0f7; font-family: var(--display); font-size: 16px; }
+.out-listen .pulse { position: relative; width: 56px; height: 56px; margin-bottom: 6px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,79,139,.16); }
+.out-listen .pulse .ms { font-size: 28px; color: var(--pink); }
+.out-listen .pulse::after { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--pink); animation: sbpulse 1.6s ease-out infinite; }
+@keyframes sbpulse { from { transform: scale(1); opacity: .8; } to { transform: scale(1.7); opacity: 0; } }
+.out-listen-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+.out-listen .btn { height: 40px; border: 0; background: var(--pink); color: var(--night); font-weight: 700; }
+.out-listen .btn.quiet { background: transparent; color: var(--lilac); border: 1px solid var(--night-line); font-weight: 600; }
+.out-listen .btn.quiet:hover { background: rgba(255,255,255,.06); color: #e9e0f7; }
 .json { margin: 0 12px 20px; padding: 16px; border-radius: 16px; background: var(--night-3); border: 1px solid var(--night-line); font-family: var(--mono); font-size: 12.5px; line-height: 1.8; word-break: break-all; }
 .json .row { padding-left: 18px; } .json .k { color: #ff8ab2; } .json .v-str { color: #ffc27a; } .json .v-num { color: #8fd3ff; } .json .v-bool { color: #c7a6ff; } .json .v-null { color: #8d80a6; }
 .out-err { margin: 0 12px 20px; padding: 14px 16px; border-radius: 16px; background: rgba(255,79,139,.1); border: 1px solid rgba(255,79,139,.35); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: #ffd2e2; word-break: break-word; }
@@ -421,15 +432,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .loose-note { position: absolute; left: 0; right: 0; bottom: calc(100% + 16px); text-align: center; font-size: 12px; font-weight: 600; color: var(--ink-3); pointer-events: none; }
 .port { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2.5px solid var(--lilac-2); display: block; }
 .port.in { position: absolute; left: 50%; top: -7px; margin-left: -7px; pointer-events: none; }
-.out { position: absolute; top: 100%; width: 0; display: flex; flex-direction: column; align-items: center; }
-.out .port { margin-top: -7px; cursor: crosshair; flex: none; position: relative; z-index: 2; touch-action: none; }
-.out .port::after { content: ''; position: absolute; inset: -9px; border-radius: 50%; }
-.out .port:hover, .out.wired .port { border-color: var(--rose); } .out .port:hover { background: var(--rose-soft); transform: scale(1.25); }
+.gnode > .out { position: absolute; top: 100%; width: 0; display: flex; flex-direction: column; align-items: center; }
+.gnode > .out .port { margin-top: -7px; cursor: crosshair; flex: none; position: relative; z-index: 2; touch-action: none; }
+.gnode > .out .port::after { content: ''; position: absolute; inset: -9px; border-radius: 50%; }
+.gnode > .out .port:hover, .gnode > .out.wired .port { border-color: var(--rose); } .gnode > .out .port:hover { background: var(--rose-soft); transform: scale(1.25); }
 .port-label { margin-top: 6px; height: 22px; line-height: 22px; padding: 0 8px; border-radius: 999px; background: var(--green-soft); color: var(--green); font-size: 11.5px; font-weight: 700; display: block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; position: relative; z-index: 2; }
 .port-label.quiet { background: var(--soft-2); color: var(--ink-2); }
-.out .plus { margin-top: 22px; flex: none; position: relative; }
-.out .plus::before { content: ''; position: absolute; left: 50%; bottom: 100%; width: 2px; height: 22px; margin-left: -1px; background: var(--lilac-2); }
-.out .port-label + .plus { margin-top: 14px; } .out .port-label + .plus::before { height: 14px; }
+.gnode > .out .plus { margin-top: 22px; flex: none; position: relative; }
+.gnode > .out .plus::before { content: ''; position: absolute; left: 50%; bottom: 100%; width: 2px; height: 22px; margin-left: -1px; background: var(--lilac-2); }
+.gnode > .out .port-label + .plus { margin-top: 14px; } .gnode > .out .port-label + .plus::before { height: 14px; }
 .wires { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .wire-line { fill: none; stroke: var(--lilac-2); stroke-width: 2.5; stroke-linecap: round; }
 .wire-line.went { stroke: var(--green-fill); stroke-width: 3; }
@@ -440,7 +451,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .wire-tools .ms { font-size: 17px; }
 .wire-tools button:hover { border-color: var(--rose); color: var(--rose); }
 .wire-tools .cut { position: absolute; left: 30px; top: 0; opacity: 0; transition: opacity .12s; z-index: 1; } .wire-tools:hover .cut, .wire-tools .cut:focus-visible { opacity: 1; }
-.canvas.wiring { cursor: crosshair; } .canvas.wiring .wire-tools, .canvas.wiring .out .plus { visibility: hidden; }
+.canvas.wiring { cursor: crosshair; } .canvas.wiring .wire-tools, .canvas.wiring .gnode > .out .plus { visibility: hidden; }
 .add-trigger { position: absolute; }
 .rule input.name { flex: 1 1 80px; width: 80px; }
 .rule .x[disabled] { opacity: .35; cursor: default; }
@@ -450,3 +461,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .b-tabs { margin: 0; } .tip { display: none; }
 
 }
+
+/* A trigger listening for the real thing ("Test this step" on a building or webhook trigger) */
+.live-dot { position: relative; width: 10px; height: 10px; border-radius: 50%; background: var(--pink); flex: none; }
+.live-dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--pink); animation: sbping 1.4s ease-out infinite; }
+@keyframes sbping { from { transform: scale(1); opacity: .7; } to { transform: scale(2.6); opacity: 0; } }
+.listen-bar { display: flex; align-items: center; gap: 10px; padding: 12px 20px; background: var(--night); color: #e9e0f7; font-size: 14px; border-bottom: 1px solid var(--night-line); }
+.listen-bar strong { font-family: var(--display); color: var(--pink); text-transform: uppercase; letter-spacing: .06em; font-size: 13px; }
+.listen-bar .listen-clock { margin-left: auto; font-family: var(--mono); font-size: 13px; color: var(--lilac-2); font-variant-numeric: tabular-nums; }
+.editor.listening > header .tile { animation: sbring 1.6s ease-out infinite; }
+@keyframes sbring { from { box-shadow: 0 0 0 0 rgba(255,79,139,.55); } to { box-shadow: 0 0 0 12px rgba(255,79,139,0); } }
+.editor .btn.listen-stop { border: 0; background: var(--pink); color: var(--night); font-weight: 700; }
+.editor .btn.listen-stop:hover { background: #ff6f9f; color: var(--night); }
+.node.listening { border: 2px solid var(--pink); animation: sbglow 1.6s ease-in-out infinite; }
+@keyframes sbglow { 50% { box-shadow: 0 0 0 7px rgba(255,79,139,.22), 0 10px 26px rgba(27,16,48,.1); } }
+.node-bar.listen { background: var(--pink); color: var(--night); }
+@media (prefers-reduced-motion: reduce) { .live-dot::after, .out-listen .pulse::after { animation: none; opacity: 0; } }

@@ -11,6 +11,7 @@
   var samples = data.samples || {};
   var results = {};          // uid -> {status, error, output, ms, real, stopped}
   var editing = null;        // uid of the step open in the editor
+  var listening = null;      // {uid, after, timer, ticker, started, until}: a trigger waiting to really fire
   var picker = null;         // {mode: 'trigger' | 'step', at, query, open}
   var dirty = false;
   var busy = false;
@@ -349,13 +350,15 @@
     wf.steps.forEach(function (step, index) {
       var def = defOf(step), result = results[step.uid], isTrigger = index === 0 && def.trigger;
       var node = h('button', {
-        type: 'button', class: 'node' + (editing === step.uid ? ' open' : '') + (def.missing ? ' bad' : ''),
+        type: 'button', class: 'node' + (editing === step.uid ? ' open' : '') + (def.missing ? ' bad' : '') + (result && result.status === 'listening' ? ' listening' : ''),
         onclick: function () { if (!justDragged) openEditor(step.uid); }
       });
-      if (isTrigger) node.appendChild(h('div', { class: 'node-bar' }, icon('bolt', 'fill'), 'Trigger'));
+      if (isTrigger) node.appendChild(result && result.status === 'listening'
+        ? h('div', { class: 'node-bar listen' }, h('span', { class: 'live-dot', 'aria-hidden': 'true' }), 'Trigger · Listening…')
+        : h('div', { class: 'node-bar' }, icon('bolt', 'fill'), 'Trigger'));
       var state = null;
       if (result && result.status) {
-        var look = { running: ['progress_activity', 'spin is-running'], ok: ['check_circle', 'fill is-ok'],
+        var look = { running: ['progress_activity', 'spin is-running'], listening: ['sensors', 'is-running'], ok: ['check_circle', 'fill is-ok'],
           failed: ['error', 'fill is-failed'], stopped: ['do_not_disturb_on', 'fill is-stopped'] }[result.status];
         if (look) state = h('span', { class: 'ms node-state ' + look[1], role: 'img', 'aria-label': result.status, text: look[0] });
       }
@@ -654,7 +657,7 @@
 
   // ---------- editor ----------
   function openEditor(id) { closePicker(); editing = id; activeSlot = null; savedRange = null; renderFlow(); renderEditor(); }
-  function closeEditor() { if (!editing) return; editing = null; veil.hidden = true; veil.textContent = ''; renderFlow(); }
+  function closeEditor() { if (!editing) return; stopListening(); editing = null; veil.hidden = true; veil.textContent = ''; renderFlow(); }
   veil.addEventListener('mousedown', function (event) { if (event.target === veil) closeEditor(); });
   document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
@@ -814,12 +817,18 @@
       h('p', { class: 'about' + (def.missing ? ' warn' : ''), text: def.desc || def.title }));
     var params = h('div', { class: 'params' });
     if (step.node === 'webhook') {
-      params.appendChild(h('div', { class: 'param' }, h('span', { class: 'param-label', text: 'Private URL' }),
-        h('div', { class: 'hook' }, h('code', { text: data.hookUrl }),
-          h('button', { type: 'button', class: 'btn small', onclick: function () {
-            (navigator.clipboard ? navigator.clipboard.writeText(data.hookUrl) : Promise.reject()).then(function () { toast('Copied'); }, function () { toast('Select the address and copy it by hand', true); });
-          } }, icon('content_copy'), 'Copy')),
-        h('span', { class: 'help', text: 'POST JSON here to start this workflow. Anyone with this address can start it, so keep it private. What you send shows up as body.… fields; test with a real call to see them.' })));
+      var hookRow = function (label, url, help) {
+        return h('div', { class: 'param' }, h('span', { class: 'param-label', text: label }),
+          h('div', { class: 'hook' }, h('code', { text: url }),
+            h('button', { type: 'button', class: 'btn small', 'aria-label': 'Copy the ' + label, onclick: function () {
+              (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(function () { toast('Copied'); }, function () { toast('Select the address and copy it by hand', true); });
+            } }, icon('content_copy'), 'Copy')),
+          h('span', { class: 'help', text: help }));
+      };
+      params.appendChild(hookRow('Test URL', data.testHookUrl,
+        'For trying it out. Press Test this step, then POST to this address: what you send shows up on the right as body.… fields. Nothing runs, and it only answers while Switchboard is listening.'));
+      params.appendChild(hookRow('Production URL', data.hookUrl,
+        'Give this one to the other service. Each call to it starts the workflow, while the workflow is on. Anyone with these addresses can call them, so keep them private.'));
     }
     var shown = def.params.filter(function (p) { return visible(step, def, p); });
     if (!shown.length && step.node !== 'webhook') {
@@ -841,8 +850,16 @@
     var out = h('section', { class: 'pane out', 'aria-label': 'Output' });
     renderOutput(out, step, def, index);
 
-    var testOne = h('button', { type: 'button', class: 'btn primary', onclick: function () { testStep(step); } }, icon('play_arrow'), 'Test this step');
-    veil.appendChild(h('section', { class: 'editor', role: 'dialog', 'aria-label': def.title },
+    var testOne = listening && listening.uid === step.uid
+      ? h('button', { type: 'button', class: 'btn listen-stop', onclick: function () { stopListening(true); } }, icon('stop_circle', 'fill'), 'Stop listening')
+      : h('button', { type: 'button', class: 'btn primary', onclick: function () { testStep(step); } }, icon('play_arrow'), 'Test this step');
+    var hearing = listening && listening.uid === step.uid;
+    var listenBar = hearing ? h('div', { class: 'listen-bar', role: 'status' },
+      h('span', { class: 'live-dot', 'aria-hidden': 'true' }),
+      h('strong', { text: 'Listening' }),
+      h('span', { text: step.node === 'webhook' ? 'Waiting for a call to the test URL.' : 'Waiting for “' + def.title + '” to happen in ' + def.kind + '.' }),
+      h('span', { class: 'listen-clock', 'aria-hidden': 'true', text: clock() })) : null;
+    veil.appendChild(h('section', { class: 'editor' + (hearing ? ' listening' : ''), role: 'dialog', 'aria-label': def.title },
       h('header', null, tile(def.tile, 'l'),
         h('div', { class: 'titles' },
           h('span', { text: (isTrigger ? 'Trigger · ' : '') + def.kind }),
@@ -851,6 +868,7 @@
         h('button', { type: 'button', class: 'btn danger', onclick: function () { removeStep(step); } }, icon('delete'), 'Remove step'),
         def.missing ? null : testOne,
         h('button', { type: 'button', class: 'x', 'aria-label': 'Close', onclick: closeEditor }, icon('close'))),
+      listenBar,
       h('div', { class: 'panes' }, inPane, mid, out)));
   }
 
@@ -958,6 +976,21 @@
       out.appendChild(h('div', { class: 'out-wait' }, icon('progress_activity', 'spin'), 'Running this step…'));
       return;
     }
+    if (result && result.status === 'listening') {
+      head.appendChild(h('span', { class: 'pill listen' }, icon('sensors'), 'Listening'));
+      out.appendChild(h('div', { class: 'out-listen', role: 'status' },
+        h('span', { class: 'pulse', 'aria-hidden': 'true' }, icon('sensors')),
+        step.node === 'webhook' ? [
+          h('strong', { text: 'Waiting for a call to the test URL' }),
+          h('span', { text: 'POST to the test URL now (copy it from the settings). What you send shows up here. The workflow doesn’t run.' })
+        ] : [
+          h('strong', { text: 'Waiting for “' + def.title + '” in ' + def.kind }),
+          h('span', { text: 'Make it happen in ' + def.kind + ' now. When it does, what it sent shows up here.' })
+        ],
+        h('div', { class: 'out-listen-actions' },
+          h('button', { type: 'button', class: 'btn quiet', onclick: function () { stopListening(); testWithLast(step); } }, 'Use the last one instead'))));
+      return;
+    }
     if (result && result.status === 'failed') {
       head.appendChild(h('span', { class: 'pill bad' }, icon('error', 'fill'), "Didn't work"));
       out.appendChild(h('div', { class: 'out-err', text: result.error || 'This step failed.' }));
@@ -966,7 +999,9 @@
     var body = result && result.output ? result.output : (sample && typeof sample === 'object' ? sample : null);
     if (!body) {
       out.appendChild(h('div', { class: 'out-empty' }, icon('science'),
-        index === 0 ? 'Test this trigger to see what it sends to the next step.' : 'Test this step to see what it sends to the next one.',
+        index === 0 && step.node === 'event' ? 'Press Test this step, then make it happen in ' + def.kind + '. Switchboard waits for it and shows what it sent.'
+          : index === 0 && step.node === 'webhook' ? 'Press Test this step, then POST to the test URL. Switchboard waits for the call and shows what it sent.'
+          : index === 0 ? 'Test this trigger to see what it sends to the next step.' : 'Test this step to see what it sends to the next one.',
         def.missing ? null : h('button', { type: 'button', class: 'btn', onclick: function () { testStep(step); } }, 'Test this step')));
       return;
     }
@@ -974,7 +1009,8 @@
     else if (result && result.stopped) head.appendChild(h('span', { class: 'pill stop' }, icon('do_not_disturb_on', 'fill'), "Check didn't pass"));
     else if (result) head.appendChild(h('span', { class: 'pill' }, icon('check_circle', 'fill'), 'Worked' + (result.ms != null ? ' · ' + result.ms + ' ms' : '')));
     out.appendChild(h('p', { class: 'out-note', text: result
-      ? (index === 0 && result.real === false ? 'Sample data. Real data shows here once this trigger has fired.' : 'From the test you just ran')
+      ? (index === 0 && result.real === false ? 'Sample data. Real data shows here once this trigger has fired.'
+        : result.heard ? 'Heard at ' + result.at + ': ' + result.heard : 'From the test you just ran')
       : 'From your last test' }));
     var rows = flatten(body), json = h('div', { class: 'json' }, h('div', { text: '{' }));
     rows.forEach(function (pair, i) {
@@ -990,6 +1026,65 @@
   }
 
   function testStep(step) {
+    if (step === wf.steps[0] && (step.node === 'event' || step.node === 'webhook')) { listen(step); return; }
+    testWithLast(step);
+  }
+
+  // A building's trigger: wait for the event to really happen there (the server keeps every
+  // event a building sends, so this asks every few seconds for one newer than `after`).
+  var LISTEN_EVERY = 2000, LISTEN_FOR = 10 * 60 * 1000;
+  function listen(step) {
+    stopListening();
+    var mine = listening = { uid: step.uid, after: null, timer: null, started: Date.now(), until: Date.now() + LISTEN_FOR,
+      ticker: setInterval(tickClock, 1000) };
+    results[step.uid] = { status: 'listening' };
+    renderEditor(); renderFlow();
+    var ask = function () {
+      if (listening !== mine) return;
+      post(data.urls.listen, { steps: wf.steps, uid: step.uid, after: mine.after }).then(function (answer) {
+        if (listening !== mine) return;
+        if (!answer.ok) {
+          clearInterval(mine.ticker); listening = null;
+          results[step.uid] = { status: 'failed', error: answer.error || 'Couldn’t listen for this event.' };
+        } else if (answer.listening) {
+          mine.after = answer.after;
+          if (Date.now() < mine.until) { mine.timer = setTimeout(ask, LISTEN_EVERY); return; }
+          clearInterval(mine.ticker); listening = null; delete results[step.uid];
+          toast('Nothing came in for 10 minutes, so Switchboard stopped listening. Press Test this step to listen again.', true);
+        } else {
+          clearInterval(mine.ticker); listening = null;
+          results[step.uid] = { status: 'ok', output: answer.output, real: true, heard: answer.heard, at: answer.at };
+          samples[step.uid] = answer.output;
+          toast(step.node === 'webhook' ? 'Call received' : 'Event received');
+        }
+        if (editing === step.uid) renderEditor();
+        renderFlow();
+      });
+    };
+    ask();
+  }
+  function clock() {
+    var secs = listening ? Math.max(0, Math.floor((Date.now() - listening.started) / 1000)) : 0;
+    return Math.floor(secs / 60) + ':' + ('0' + secs % 60).slice(-2);
+  }
+  function tickClock() {
+    var el = veil.querySelector('.listen-clock');
+    if (el) el.textContent = clock();
+  }
+  function stopListening(rerender) {
+    if (!listening) return;
+    var uid = listening.uid, step = stepByUid(uid);
+    clearTimeout(listening.timer); clearInterval(listening.ticker);
+    listening = null;
+    // A webhook's test URL closes by itself shortly after, but say so now.
+    if (step && step.node === 'webhook') post(data.urls.listen, { steps: wf.steps, uid: uid, stop: true });
+    if (results[uid] && results[uid].status === 'listening') delete results[uid];
+    if (rerender) { if (editing === uid) renderEditor(); renderFlow(); }
+  }
+
+  // Run one step now: a trigger gets its newest real data (else sample data), any other step
+  // really runs with the earlier steps' sample data.
+  function testWithLast(step) {
     var def = defOf(step);
     var real = step.node === 'http' || (step.node === 'action' && !def.lookup);
     if (real && !window.confirm('This really does it, using the sample data on the left. Go ahead?')) return;
@@ -1016,6 +1111,7 @@
         if (onward && onward !== s.uid && !first) s.next[p] = onward; else delete s.next[p];
       });
     });
+    if (listening && listening.uid === step.uid) stopListening();
     wf.steps.splice(wf.steps.indexOf(step), 1);
     delete results[step.uid]; delete samples[step.uid];
     editing = null; veil.hidden = true; veil.textContent = '';

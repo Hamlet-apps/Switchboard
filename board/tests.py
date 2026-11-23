@@ -861,6 +861,13 @@ class PageTests(Base):
         self.assertEqual(Settings.load().org_name, 'Holy Eucharist')
         self.assertRedirects(self.client.get(reverse('setup')), reverse('login'), fetch_redirect_response=False)
 
+    def test_scripts_and_styles_change_address_when_edited_in_development(self):
+        from .templatetags.board_tags import asset
+        with self.settings(DEBUG=True):
+            self.assertRegex(asset('board/board.css'), r'board\.css\?v=\d+$')
+        with self.settings(DEBUG=False):
+            self.assertNotIn('?v=', asset('board/board.css'))     # hashed names do that in production
+
     def test_pages_need_sign_in(self):
         self.client.logout()
         for name in ('workflows', 'runs', 'buildings', 'settings'):
@@ -990,6 +997,73 @@ class BuilderTests(Base):
                       (422, {'error': {'code': 'invalid_params', 'message': 'Email is missing.'}}))
         failed = self.post('test_step', workflow, {'steps': workflow.steps, 'uid': workflow.steps[1]['uid']}).json()
         self.assertEqual((failed['ok'], failed['error']), (False, '422 · Email is missing.'))
+
+    def test_listen_waits_for_the_trigger_event_to_really_happen(self):
+        workflow = self.recipe(enabled=False)
+        trigger = workflow.steps[0]['uid']
+        body = {'steps': workflow.steps, 'uid': trigger}
+        self.deliver(self.th, self.level_event(level=2, event_id='evt_old'))     # before listening
+        start = self.post('listen', workflow, body).json()
+        self.assertEqual((start['ok'], start['listening']), (True, True))
+        body['after'] = start['after']
+        self.assertTrue(self.post('listen', workflow, body).json()['listening'])
+        self.deliver(self.th, {**self.level_event(event_id='evt_other'), 'type': 'shift.signed_up'})
+        self.deliver(self.pv, {**self.level_event(event_id='evt_pv')})          # another building
+        self.assertTrue(self.post('listen', workflow, body).json()['listening'])
+        self.deliver(self.th, self.level_event(level=4, event_id='evt_new'))
+        heard = self.post('listen', workflow, body).json()
+        self.assertNotIn('listening', heard)
+        self.assertEqual((heard['real'], heard['output']['level']), (True, 4))
+        self.assertIn('Town Hall', heard['heard'])
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.samples[trigger]['level'], 4)
+        self.assertFalse(workflow.runs.exists())     # paused: hearing it ran nothing
+
+    def test_webhook_test_url_answers_only_while_listening_and_runs_nothing(self):
+        steps = [{'uid': 'w', 'node': 'webhook', 'next': {'main': 'h'}},
+                 {'uid': 'h', 'node': 'http', 'params': {'url': 'https://example.test/x'}}]
+        workflow = Workflow.objects.create(name='Hook', enabled=True, steps=steps)
+        test_url = reverse('workflow_hook_test', args=[workflow.hook_token])
+        call = lambda: self.client.post(test_url + '?from=crm', json.dumps({'order': 7}),  # noqa: E731
+                                        content_type='application/json')
+        self.assertEqual(call().status_code, 404)                 # nobody listening yet
+        page = self.client.get(reverse('builder', args=[workflow.pk])).context['data']
+        self.assertTrue(page['testHookUrl'].endswith(test_url))
+        body = {'steps': steps, 'uid': 'w'}
+        body['after'] = self.post('listen', workflow, body).json()['after']
+        self.assertTrue(self.post('listen', workflow, body).json()['listening'])
+        self.assertEqual(call().status_code, 200)
+        self.assertEqual(call().status_code, 404)                 # caught one; closed again
+        heard = self.post('listen', workflow, body).json()
+        self.assertEqual((heard['output']['body'], heard['output']['query']), ({'order': 7}, {'from': 'crm'}))
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.samples['w']['body'], {'order': 7})
+        self.assertFalse(workflow.runs.exists())
+        # Stopping closes the test URL; the production URL still starts the workflow.
+        self.post('listen', workflow, {'steps': steps, 'uid': 'w'})
+        self.post('listen', workflow, {'steps': steps, 'uid': 'w', 'stop': True})
+        self.assertEqual(call().status_code, 404)
+        self.world.on('POST', 'https://example.test/x', (200, {}))
+        live = self.client.post(reverse('workflow_hook', args=[workflow.hook_token]), '{}', content_type='application/json')
+        self.assertEqual(live.status_code, 202)
+        self.assertEqual(workflow.runs.count(), 1)
+
+    def test_webhook_test_url_closes_when_the_builder_stops_asking(self):
+        steps = [{'uid': 'w', 'node': 'webhook'}]
+        workflow = Workflow.objects.create(name='Hook', steps=steps)
+        self.post('listen', workflow, {'steps': steps, 'uid': 'w'})
+        Workflow.objects.filter(pk=workflow.pk).update(test_until=timezone.now() - datetime.timedelta(seconds=1))
+        test_url = reverse('workflow_hook_test', args=[workflow.hook_token])
+        self.assertEqual(self.client.post(test_url, '{}', content_type='application/json').status_code, 404)
+
+    def test_listen_refuses_other_steps_and_broken_buildings(self):
+        workflow = self.recipe(enabled=False)
+        other = self.post('listen', workflow, {'steps': workflow.steps, 'uid': workflow.steps[1]['uid']})
+        self.assertEqual(other.status_code, 400)
+        Connection.objects.filter(pk=self.th.pk).update(status=Connection.BROKEN)
+        broken = self.post('listen', workflow, {'steps': workflow.steps, 'uid': workflow.steps[0]['uid']}).json()
+        self.assertFalse(broken['ok'])
+        self.assertIn('Reconnect it in Buildings', broken['error'])
 
     def test_test_workflow_runs_it_as_a_test(self):
         workflow = self.recipe(enabled=False)

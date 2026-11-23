@@ -73,6 +73,6 @@ Until the village has shared accounts, people are matched between buildings by e
 
 ## Not built yet
 
-Loops over lists, workflow versions, a recipe gallery
+Workflow versions, a recipe gallery
 shared between organizations, and per-connection scopes (a connection can use every action
 its building offers).

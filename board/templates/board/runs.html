@@ -66,10 +66,10 @@
     {% if selected.run.error and not selected.steps %}<p class="err">{{ selected.run.error }}</p>{% endif %}
     <ol class="run-steps">
       {% for step in selected.steps %}
-      <li class="is-{{ step.status }}">
+      <li class="is-{{ step.status }}"{% if step.depth %} style="margin-left: {% widthratio step.depth 1 16 %}px"{% endif %}>
         <span class="ms fill is-{{ step.status }}" aria-hidden="true">{% if step.status == 'ok' %}check_circle{% elif step.status == 'failed' %}error{% elif step.status == 'stopped' %}do_not_disturb_on{% else %}radio_button_unchecked{% endif %}</span>
         <div class="body">
-          <b>{{ step.title }}</b>
+          <b>{{ step.title }}{% if step.item %} <span class="item-no">item {{ step.item }}</span>{% endif %}</b>
           {% if step.note %}<small>{{ step.note }}</small>{% endif %}
           {% if step.error %}<span class="err">{{ step.error }}</span>{% endif %}
           {% if step.sent or step.output %}

@@ -64,7 +64,7 @@ def _clean_cases(raw):
     cases, ids = [], set()
     for case in raw if isinstance(raw, list) else []:
         key = str(case.get('id', '')) if isinstance(case, dict) else ''
-        if key in ('default', 'main', 'true', 'false') or not UID.match(key) or key in ids or len(cases) >= 12:
+        if key in ('default', 'main', 'true', 'false', 'each', 'done') or not UID.match(key) or key in ids or len(cases) >= 12:
             continue
         ids.add(key)
         op = case.get('op') if case.get('op') in dict(MAP_OPS) else 'eq'
@@ -202,7 +202,16 @@ def _sample_context(workflow, earlier, connections):
         sample = workflow.samples.get(step['uid'])
         if not isinstance(sample, dict):
             definition = nodes.describe(step, connections)
-            sample = engine.trigger_sample(workflow, step, definition)[0] if index == 0 else nodes.example_output(definition)
+            if index == 0:
+                sample = engine.trigger_sample(workflow, step, definition)[0]
+            elif step['node'] == 'loop':
+                # Inside a loop, steps see its first item: go through the list as it stands in the samples.
+                try:
+                    sample = engine.loop_sample(engine.perform(step, definition, ctx, connections, {}, '')[0])
+                except BuildingError:
+                    sample = {'item': None, 'index': 1, 'count': 0}
+            else:
+                sample = nodes.example_output(definition)
         ctx[step['uid']] = sample
     return ctx
 
@@ -226,7 +235,11 @@ def workflow_test_step(request, workflow, body):
         try:
             output, _sent, note, _tries = engine.perform_with_retries(
                 step, definition, ctx, connections, secrets_, uuid.uuid4().hex, waits=[])
+            if step['node'] == 'loop':
+                note, output = f'{note} to go through', engine.loop_sample(output)
             result = {'ok': True, 'output': output, 'real': True}
+            if step['node'] == 'loop':
+                result['note'] = note
             if step['node'] in nodes.BRANCHING:
                 result['took'] = note
         except engine.Stop:
@@ -317,15 +330,25 @@ def workflow_test(request, workflow, body):
     run = engine.start_run(workflow, sample, f"Test · {definition['title']}", is_test=True)
     engine.execute(run)
     run.refresh_from_db()
-    results = {r.uid: r for r in run.step_results.all()}
-    Workflow.objects.filter(pk=workflow.pk).update(samples={**workflow.samples, **{
-        uid: value for uid, value in run.context.items() if isinstance(value, dict)}})
+    # A step inside a loop has a result per item: show the worst, and keep the first item's
+    # output as its sample.
+    rank = {'failed': 0, 'stopped': 1, 'ok': 2}
+    results, samples = {}, {}
+    for result in run.step_results.all():
+        if result.uid not in results or rank.get(result.status, 3) < rank.get(results[result.uid].status, 3):
+            results[result.uid] = result
+    for key, value in run.context.items():
+        uid, _, iteration = key.partition('@')
+        step = nodes.find(run.steps, uid)
+        if step and isinstance(value, dict) and (not iteration or set(iteration.split('.')) == {'1'}):
+            samples[uid] = engine.loop_sample(value) if step['node'] == 'loop' else value
+    Workflow.objects.filter(pk=workflow.pk).update(samples={**workflow.samples, **samples})
     return JsonResponse({
         'ok': run.status != Run.FAILED, 'status': run.status, 'run': run.pk, 'error': run.error,
         'runUrl': f"{reverse('runs')}?run={run.pk}&tests=1",
         'steps': [{'uid': step['uid'], 'status': results[step['uid']].status if step['uid'] in results else 'skipped',
                    'error': results[step['uid']].error if step['uid'] in results else '',
-                   'output': results[step['uid']].output if step['uid'] in results else None}
+                   'output': samples.get(step['uid']) if step['uid'] in results else None}
                   for step in nodes.walk(run.steps)],
     })
 

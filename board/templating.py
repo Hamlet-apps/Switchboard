@@ -60,11 +60,8 @@ def flatten(obj, prefix='', limit=60):
         if isinstance(value, dict) and value:
             for k, v in value.items():
                 walk(v, f'{key}.{k}' if key else str(k))
-        elif isinstance(value, list) and value and all(isinstance(v, (dict, list)) for v in value[:1]):
-            for i, v in enumerate(value[:3]):
-                walk(v, f'{key}.{i}')
         elif key:
-            out.append((key, value))
+            out.append((key, value))        # a list stays one field: a "For each" step goes through it
 
     walk(obj, prefix)
     return out
@@ -187,6 +184,8 @@ def _resolve_map(spec, ctx, secrets):
 
 def coerce(value, type_):
     """Shape a resolved value for a building: raises ValueError with a plain message."""
+    if type_ == 'list' and isinstance(value, list):
+        return value                # an empty list is still a list: the loop just has nothing to do
     if is_empty(value):
         return None
     if type_ == 'int':
@@ -203,7 +202,18 @@ def coerce(value, type_):
         return truthy(value)
     if type_ in ('string', 'datetime'):
         return text(value)
+    if type_ == 'list':
+        return as_list(value)
     return value
+
+
+def as_list(value):
+    """What a "For each" goes through: a list as it is, or text split at commas and line breaks."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [part.strip() for part in re.split(r'[,\n]', value) if part.strip()]
+    raise ValueError(f'"{text(value)}" isn\'t a list')
 
 
 def tokens_in(value):

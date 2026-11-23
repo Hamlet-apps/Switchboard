@@ -17,6 +17,8 @@ from .buildings import BuildingError
 from .templating import TOKEN, coerce, is_empty
 
 TYPES = ('string', 'int', 'number', 'bool', 'datetime', 'money')
+FIELD_TYPES = TYPES + ('list',)        # fields (outputs, events) may also be lists; params may not
+LIST_LIMIT = 200
 NAME = re.compile(r'^[a-z0-9_]+(\.[a-z0-9_]+)*$')
 KEY = re.compile(r'^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$')
 MAX_NOTES = 20
@@ -40,10 +42,12 @@ def type_error(value, type_):
             except ValueError:
                 pass
         return 'should be a date and time like 2026-11-19T16:20:04-08:00'
+    if type_ == 'list':
+        return '' if isinstance(value, list) and all(isinstance(item, dict) for item in value) else 'should be a list of objects'
     return ''
 
 
-def _fields(items, where, errors, notes):
+def _fields(items, where, errors, notes, nested=False):
     if not isinstance(items, list):
         errors.append(f'{where}: the fields should be a list')
         return
@@ -56,8 +60,18 @@ def _fields(items, where, errors, notes):
         if key in seen:
             notes.append(f'{where}: the field "{key}" is listed twice')
         seen.add(key)
-        if field.get('type') not in TYPES:
-            errors.append(f'{where}: the field "{key}" has no type Switchboard knows (one of {", ".join(TYPES)})')
+        if field.get('type') not in FIELD_TYPES:
+            errors.append(f'{where}: the field "{key}" has no type Switchboard knows (one of {", ".join(FIELD_TYPES)})')
+        elif field['type'] == 'list':
+            items = field.get('items')
+            if nested:
+                errors.append(f'{where}: the list "{key}" is inside another list')
+            elif not isinstance(items, list) or not items:
+                errors.append(f'{where}: the list "{key}" does not say what its items hold')
+            else:
+                _fields(items, f'{where}, list "{key}"', errors, notes, nested=True)
+                if not isinstance(field.get('example'), list) or not field['example']:
+                    notes.append(f'{where}: the list "{key}" has no example item')
         elif 'example' not in field:
             notes.append(f'{where}: the field "{key}" has no example')
         elif type_error(field['example'], field['type']):
@@ -175,12 +189,17 @@ def mismatches(fields, data):
         return ['answered something that is not an object']
     for field in fields or []:
         value = dig(data, field['key'])
-        if value is None or field.get('type') not in TYPES:
+        if value is None or field.get('type') not in FIELD_TYPES:
             continue
         wrong = type_error(value, field['type'])
         if wrong:
             found.append(f'"{field["key"]}" {wrong}, but was {value!r}'[:200])
-    return found
+        elif field['type'] == 'list':
+            if len(value) > LIST_LIMIT:
+                found.append(f'"{field["key"]}" has {len(value)} items; a list carries at most {LIST_LIMIT}')
+            for index, item in enumerate(value[:20]):
+                found += [f'"{field["key"]}" item {index + 1}: {wrong}' for wrong in mismatches(field.get('items'), item)][:3]
+    return found[:10]
 
 
 def remember(connection, notes):

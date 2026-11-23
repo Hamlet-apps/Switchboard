@@ -97,6 +97,31 @@ The manifest is a promise, and Switchboard checks it:
   declared type (a field that is missing or `null` is fine). A mismatch never fails a run; it
   is listed on the Buildings page, as is an event whose `type` the manifest doesn't list.
 
+### Lists
+
+A field (in an action's `output`, or a trigger's `fields`) may be a list of things, so a
+workflow can loop over them with a "For each" step:
+
+```json
+{"key": "people", "type": "list", "label": "People",
+ "items": [
+   {"key": "person_id", "type": "string", "label": "Person ID", "example": "42"},
+   {"key": "name", "type": "string", "label": "Name", "example": "Maria K."},
+   {"key": "email", "type": "string", "label": "Email", "example": "maria@example.org"}
+ ],
+ "example": [{"person_id": "42", "name": "Maria K.", "email": "maria@example.org"}]}
+```
+
+- The value is a JSON array of objects. `items` declares each object's fields the same way
+  as any other fields (keys may be dotted paths; no lists inside lists). The `example` is an
+  array with at least one item.
+- An empty list is `[]`, never left out or `null`.
+- At most 200 items. If there are more, send the first 200 in a sensible order and say how
+  many there are in all in a separate `count` field.
+- Give each item what a later step needs to act on it without another lookup: its id, a
+  name, and an email where it is a person.
+- Lists are for outputs and events. Params stay single values.
+
 JSON types: `string` is a JSON string (ids too, even numeric ones), `int` a whole number,
 `number` and `money` a number (never text like `"10.00"`), `bool` true or false, `datetime`
 a string in ISO 8601 with an offset.
@@ -224,8 +249,8 @@ each, and the few names Switchboard's ready-made recipes depend on (those must n
 
 Shared shapes, so workflows can mix buildings: a person is `person.id|name|email` in Town Hall
 and `staff.id|name|email` or `customer.name|email` in Pavilion; ids are strings; a lookup
-answers `found`, and one that can match several answers `count`, the first match in full and
-the rest as names joined into text (Switchboard has no loops yet).
+answers `found`, and one that can match several answers `count`, the first match in full, and the matches as a
+list a workflow can loop over.
 
 ### Town Hall (`town-hall`): 43 events, 36 actions
 

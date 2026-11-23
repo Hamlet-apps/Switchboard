@@ -131,6 +131,9 @@ if PRODUCTION:
 # --- Switchboard -------------------------------------------------------------------------
 # Seconds to wait before the 2nd, 3rd… try of a step that hit a network error or a 5xx.
 STEP_RETRY_WAITS = [2, 8]
+# The most items a "For each" step goes through, and the most steps one run may do in all.
+LOOP_LIMIT = 500
+RUN_STEP_LIMIT = 5000
 # A workflow that starts this many times within the window is taken to be looping and is paused.
 RUNAWAY_LIMIT = 120
 RUNAWAY_WINDOW = 60

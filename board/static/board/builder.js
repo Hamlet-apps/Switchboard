@@ -65,7 +65,7 @@
   function touch() { dirty = true; renderHead(); }
 
   // ---------- definitions and sample data ----------
-  var BUILTIN = { manual: 1, schedule: 1, webhook: 1, failure: 1, condition: 1, 'if': 1, 'switch': 1, http: 1 };
+  var BUILTIN = { manual: 1, schedule: 1, webhook: 1, failure: 1, condition: 1, 'if': 1, 'switch': 1, loop: 1, http: 1 };
   
   function defOf(step) {
     var id = BUILTIN[step.node] ? step.node : step.node + ':' + step.connection + ':' + step.key;
@@ -81,11 +81,13 @@
   var W = 360;                 // a node's width, as in the stylesheet
   function ports(step) {
     if (step.node === 'if') return ['true', 'false'];
+    if (step.node === 'loop') return ['each', 'done'];
     if (step.node === 'switch') return (step.cases || []).map(function (c) { return c.id; }).concat(['default']);
     return ['main'];
   }
   function portLabel(step, port) {
     if (step.node === 'if') return port === 'true' ? 'True' : 'False';
+    if (step.node === 'loop') return port === 'each' ? 'Each item' : 'When done';
     if (step.node !== 'switch') return '';
     if (port === 'default') return 'Otherwise';
     var c = (step.cases || []).filter(function (x) { return x.id === port; })[0];
@@ -193,22 +195,34 @@
       if (out.length >= 60) return;
       if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length) {
         Object.keys(value).forEach(function (k) { walk(value[k], key ? key + '.' + k : k); });
-      } else if (Array.isArray(value) && value.length && typeof value[0] === 'object' && value[0]) {
-        value.slice(0, 3).forEach(function (v, i) { walk(v, key + '.' + i); });
-      } else if (key) out.push([key, value]);
+      } else if (key) out.push([key, value]);      // a list stays one field: a For each goes through it
     })(obj, '');
     return out;
   }
   function fieldsOf(step) {
     var sample = samples[step.uid];
     if (sample && typeof sample === 'object' && Object.keys(sample).length) return { real: true, fields: flatten(sample) };
+    if (step.node === 'loop') return { real: false, fields: loopFields(step) };
     return { real: false, fields: defOf(step).out.map(function (f) { return [f.key, f.example]; }) };
+  }
+  // Before a For each has been tested: what one item holds, from the list it was given (the
+  // building's manifest says what's in each item).
+  function loopFields(step) {
+    var found = tokensIn((step.params || {}).list)[0], source = found && stepByUid(found[0]), fields = [['item', undefined]];
+    if (source) {
+      var sample = samples[source.uid], real = sample && found[1].split('.').reduce(function (o, k) { return o && typeof o === 'object' ? o[k] : undefined; }, sample);
+      var listed = defOf(source).out.filter(function (f) { return f.key === found[1] && f.items; })[0];
+      if (Array.isArray(real) && real.length) fields = flatten({ item: real[0] });
+      else if (listed) fields = listed.items.map(function (f) { return ['item.' + f.key, f.example]; });
+    }
+    return fields.concat([['index', 1], ['count', undefined]]);
   }
   function show(value) {
     if (value === null || value === undefined) return ['null', 'v-null'];
     if (typeof value === 'string') return [JSON.stringify(value), 'v-str'];
     if (typeof value === 'boolean') return [String(value), 'v-bool'];
     if (typeof value === 'number') return [String(value), 'v-num'];
+    if (Array.isArray(value)) return ['list of ' + value.length + (value.length === 1 ? ' item' : ' items'), 'v-null'];
     return [JSON.stringify(value), 'v-null'];
   }
   function tokensIn(value) {
@@ -416,7 +430,7 @@
         var x1 = portX(step, port), y1 = bottom + 7, x2 = target.x + W / 2, y2 = target.y - 7;
         var from = results[step.uid], to = results[target.uid];
         var went = from && from.status === 'ok' && to && to.status && to.status !== 'running' &&
-          (all.length === 1 || (from.output && from.output.branch === port));
+          (all.length === 1 || step.node === 'loop' || (from.output && from.output.branch === port));
         wires.appendChild(svg('path', { d: curve(x1, y1, x2, y2), class: 'wire-line' + (went ? ' went' : '') }));
         // With these control points the curve's midpoint is simply halfway. Labelled outputs
         // keep their label clear, so their buttons sit a little lower.
@@ -445,6 +459,7 @@
   function summary(step, def) {
     if (step.node === 'if') return 'Sends the run out of True or False.';
     if (step.node === 'switch') return 'Sends the run out of the first case that matches.';
+    if (step.node === 'loop') return 'Runs "Each item" once for every item in the list, then carries on from "When done".';
     if (step.node === 'condition') return 'Stops the workflow here unless the condition is true.';
     if (step.node === 'schedule') {
       var p = step.params || {}, at = p.time || '08:00', days = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
@@ -581,7 +596,7 @@
         step.x = onto.x; step.y = onto.y;
         var push = 230 + (ports(step).length > 1 ? 40 : 0);
         downstream(onto.uid).forEach(function (s) { s.y += push; });
-        step.next[ports(step)[0]] = onto.uid;
+        step.next[step.node === 'loop' ? 'done' : ports(step)[0]] = onto.uid;   // what followed comes after the loop, not inside it
         from.next[at.port] = step.uid;
       } else if (from) {
         var all = ports(from), i = all.indexOf(at.port);
@@ -1010,7 +1025,8 @@
     else if (result) head.appendChild(h('span', { class: 'pill' }, icon('check_circle', 'fill'), 'Worked' + (result.ms != null ? ' · ' + result.ms + ' ms' : '')));
     out.appendChild(h('p', { class: 'out-note', text: result
       ? (index === 0 && result.real === false ? 'Sample data. Real data shows here once this trigger has fired.'
-        : result.heard ? 'Heard at ' + result.at + ': ' + result.heard : 'From the test you just ran')
+        : result.heard ? 'Heard at ' + result.at + ': ' + result.heard
+        : result.note ? result.note + '. This is the first one: steps inside the loop get each in turn.' : 'From the test you just ran')
       : 'From your last test' }));
     var rows = flatten(body), json = h('div', { class: 'json' }, h('div', { text: '{' }));
     rows.forEach(function (pair, i) {
@@ -1092,7 +1108,7 @@
     renderEditor(); renderFlow();
     post(data.urls.test_step, { steps: wf.steps, uid: step.uid }).then(function (answer) {
       if (answer.ok) {
-        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped, took: answer.took };
+        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped, took: answer.took, note: answer.note };
         samples[step.uid] = answer.output;
       } else results[step.uid] = { status: 'failed', error: answer.error || 'This step failed.' };
       if (editing === step.uid) renderEditor();
@@ -1104,7 +1120,7 @@
     var first = step === wf.steps[0];
     if (first && wf.steps.length > 1 && !window.confirm('Remove the trigger? The other steps stay, but the workflow can’t run until you add a new one.')) return;
     // Whatever led into this step now leads to what came after it, so the line stays whole.
-    var onward = targets(step)[0];
+    var onward = step.node === 'loop' ? (step.next || {}).done : targets(step)[0];
     wf.steps.forEach(function (s) {
       ports(s).forEach(function (p) {
         if ((s.next || {})[p] !== step.uid) return;

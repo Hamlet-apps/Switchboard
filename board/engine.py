@@ -103,6 +103,11 @@ def perform(step, definition, ctx, connections, secrets, dedupe):
         if not passed:
             raise Stop("Check didn't pass, so the workflow stopped here")
         return {'passed': True}, values, 'Check passed'
+    if node == 'loop':
+        items = values.get('list') or []
+        if len(items) > settings.LOOP_LIMIT:
+            raise BuildingError(f'This list has {len(items)} items. A For each goes through at most {settings.LOOP_LIMIT}.')
+        return {'count': len(items), 'items': items}, {'list': f'{len(items)} items'}, f"{len(items)} item{'' if len(items) == 1 else 's'}"
     if node == 'if':
         result = templating.compare(values.get('left'), values.get('op', 'true'), values.get('right'))
         return {'result': result, 'branch': 'true' if result else 'false'}, values, 'True' if result else 'False'
@@ -187,7 +192,12 @@ def execute(run):
 
     Steps that already have a result (the trigger, and everything before the failed step on
     a retry) are not done again; an If or Switch that already decided keeps its decision.
-    A step is never done twice in one run, so a loop in the wiring just ends the run.
+    A step is never done twice on one pass, so a loop in the wiring just ends the run.
+
+    A "For each" step runs what its "Each item" output leads to once per item, then carries on
+    from "When done". Each pass is an *iteration* ('3', or '3.2' for a loop inside a loop):
+    results, stored outputs (`uid@3` in `Run.context`) and idempotency keys are kept per
+    iteration, so a retry picks up at the item that failed.
     """
     if not Run.objects.filter(pk=run.pk, status=Run.QUEUED).update(status=Run.RUNNING, started_at=timezone.now()):
         return None
@@ -195,58 +205,85 @@ def execute(run):
     started = time.monotonic()
     connections, secrets = _connections(), _secrets()
     ctx = dict(run.context)
-    done = set(run.step_results.filter(status=RunStep.OK).values_list('uid', flat=True))
-    order = {'next': run.step_results.count()}
+    done = set(run.step_results.filter(status=RunStep.OK).values_list('uid', 'iteration'))
+    order = {'next': run.step_results.count(), 'steps': 0}
+    steps = nodes.upgrade(run.steps)
+    by_uid = {step['uid']: step for step in steps}
 
-    def record(step, definition, **result):
-        existing = RunStep.objects.filter(run=run, uid=step['uid']).first()
+    def record(step, iteration, definition, **result):
+        existing = RunStep.objects.filter(run=run, uid=step['uid'], iteration=iteration).first()
         if existing is None:
             index, order['next'] = order['next'], order['next'] + 1
         else:
             index = existing.index
         defaults = {'index': index, 'title': definition['title'], 'tries': 1, 'duration_ms': 0, 'sent': None,
                     'output': None, 'error': '', 'note': '', **result}
-        RunStep.objects.update_or_create(run=run, uid=step['uid'], defaults=defaults)
+        RunStep.objects.update_or_create(run=run, uid=step['uid'], iteration=iteration, defaults=defaults)
 
-    def follow(steps):
-        """From the trigger, do a step, leave by one of its outputs, and go where that leads."""
-        by_uid = {step['uid']: step for step in steps}
-        step, visited = (steps[0] if steps else None), set()
+    def follow(step, iteration, view):
+        """Do a step, leave by one of its outputs, go where that leads, until the path ends.
+
+        `view` is what steps here can read: each earlier step's output by uid (inside a loop,
+        the loop's entry is the current item).
+        """
+        visited = set()
         while step is not None and step['uid'] not in visited:
             uid = step['uid']
+            key = f'{uid}@{iteration}' if iteration else uid
             visited.add(uid)
+            order['steps'] += 1
+            if order['steps'] > settings.RUN_STEP_LIMIT:
+                raise _Halt(Run.FAILED, f'Stopped after {settings.RUN_STEP_LIMIT} steps: that is more than one run may do.', uid)
             definition = nodes.describe(step, connections)
-            if uid in ctx and uid in done:
-                output = ctx[uid]
-            elif uid in ctx:            # the trigger: its data came with the run
-                output = ctx[uid]
-                record(step, definition, status=RunStep.OK, output=output, note=run.trigger_label)
+            if key in ctx and (uid, iteration) in done:
+                output = ctx[key]
+            elif key in ctx:            # the trigger: its data came with the run
+                output = ctx[key]
+                record(step, iteration, definition, status=RunStep.OK, output=output, note=run.trigger_label)
             else:
                 began = time.monotonic()
                 took = lambda: int((time.monotonic() - began) * 1000)  # noqa: E731
+                dedupe = f'{run.dedupe}:{iteration}' if iteration else run.dedupe
                 try:
-                    output, sent, note, tries = perform_with_retries(step, definition, ctx, connections, secrets, run.dedupe)
+                    output, sent, note, tries = perform_with_retries(step, definition, view, connections, secrets, dedupe)
                 except Stop as stop:
-                    record(step, definition, status=RunStep.STOPPED, note=str(stop), duration_ms=took())
+                    if iteration:   # inside a loop a Filter only passes over this item
+                        record(step, iteration, definition, status=RunStep.STOPPED, duration_ms=took(),
+                               note="Check didn't pass, so this item was skipped")
+                        return
+                    record(step, iteration, definition, status=RunStep.STOPPED, note=str(stop), duration_ms=took())
                     raise _Halt(Run.STOPPED)
                 except BuildingError as failure:
-                    record(step, definition, status=RunStep.FAILED, error=_redact(str(failure), secrets)[:500],
+                    record(step, iteration, definition, status=RunStep.FAILED, error=_redact(str(failure), secrets)[:500],
                            tries=getattr(failure, 'tries', 1), duration_ms=took())
                     raise _Halt(Run.FAILED, str(failure), uid)
                 except Exception as crash:  # a bug in Switchboard must not leave the run "running" forever
                     log.exception('Run %s crashed at step %s', run.pk, uid)
                     message = f'Switchboard hit an unexpected problem: {crash}'
-                    record(step, definition, status=RunStep.FAILED, error=message[:500], duration_ms=took())
+                    record(step, iteration, definition, status=RunStep.FAILED, error=message[:500], duration_ms=took())
                     raise _Halt(Run.FAILED, message, uid)
-                ctx[uid] = output
-                record(step, definition, status=RunStep.OK, output=output, sent=_redact(sent, secrets), note=note,
+                ctx[key] = output
+                shown = {'count': output['count']} if step.get('node') == 'loop' else output
+                record(step, iteration, definition, status=RunStep.OK, output=shown, sent=_redact(sent, secrets), note=note,
                        tries=tries, duration_ms=took())
-            port = output.get('branch') if step.get('node') in nodes.BRANCHING and isinstance(output, dict) else 'main'
-            step = by_uid.get((step.get('next') or {}).get(port))
+            view[uid] = output
+            wires = step.get('next') or {}
+            if step.get('node') == 'loop':
+                items = output.get('items') or []
+                for number, item in enumerate(items, start=1):
+                    view[uid] = {'item': item, 'index': number, 'count': len(items)}
+                    follow(by_uid.get(wires.get('each')), f'{iteration}.{number}' if iteration else str(number), view)
+                view[uid] = {'item': items[-1] if items else None, 'index': len(items), 'count': len(items)}
+                port = 'done'
+            elif step.get('node') in nodes.BRANCHING and isinstance(output, dict):
+                port = output.get('branch')
+            else:
+                port = 'main'
+            step = by_uid.get(wires.get(port))
 
     status, error, failed_uid = Run.SUCCEEDED, '', ''
     try:
-        follow(nodes.upgrade(run.steps))
+        follow(steps[0] if steps else None, '', {})
     except _Halt as halt:
         status, error, failed_uid = halt.status, halt.error, halt.uid
 
@@ -258,6 +295,12 @@ def execute(run):
     if status == Run.FAILED and not run.is_test and not run.from_failure:
         _announce_failure(run)
     return run
+
+
+def loop_sample(output):
+    """What steps inside a loop see for its first item: the sample the builder shows."""
+    items = (output or {}).get('items') or []
+    return {'item': items[0] if items else None, 'index': 1, 'count': len(items)}
 
 
 def retry(run):

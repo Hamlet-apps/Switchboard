@@ -29,7 +29,7 @@ One app, `board`.
 | --- | --- |
 | `docs/PROTOCOL.md` | The contract with buildings. Town Hall and Pavilion implement it in their own `switchboard` apps; change it only together with them |
 | `models.py` | `Settings` (singleton, `Settings.load()`), `Secret`, `Folder`, `Connection`, `Workflow` (steps are JSON), `Event`, `Run`, `RunStep` |
-| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
+| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `loop` = For each, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
 | `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`: no longer offered in the builder, a Switch does that; still resolved for workflows that have one), `compare()` for conditions, `coerce()` to a param's type |
 | `schema.py` | Holding buildings to their manifest: `manifest_problems` (refuse or note, at connect and Check again), `check_params` and `literal_problem` (a step's settings against the params' types and limits, before sending), `mismatches` + `remember` (answers and events that don't match, kept on `Connection.contract_notes` and shown on the Buildings page; never fails a run) |
 | `buildings.py` | Manifest, handshake, action calls, signature check, and the HTTP step. Every outgoing request goes through `_http` |
@@ -44,13 +44,21 @@ One app, `board`.
 
 - **Steps are a wired graph**, kept as a flat list with the trigger first. Each step has `next`,
   a map from each of its outputs to the uid it leads to (`main`; `true`/`false` for `if`; one per
-  case plus `default` for `switch`, whose cases are in `step["cases"]`), and `x`/`y`, its place on
+  case plus `default` for `switch`, whose cases are in `step["cases"]`; `each`/`done` for `loop`), and `x`/`y`, its place on
   the canvas. An output may be unwired (the run ends there) and several may lead to one step;
   loops are refused. A run follows one path. `condition` is the Filter node (the name is kept
   because workflows store it): it stops the run. Use `nodes.ports`, `nodes.reachable`,
   `nodes.before` (the steps a step can read from) and `nodes.find`; `nodes.upgrade` turns the two
   older shapes (a plain list, and a tree with `branches`) into this one, so call it before
   reading stored steps. `builder.js` mirrors these (`ports`, `downstream`, `before`, `tidy`).
+- **For each** (`loop`): its `list` setting is a list field (protocol type `list`: an array of
+  objects whose fields the manifest gives as `items`) or text with commas. The steps wired to
+  `each` run once per item and read `{{<loop uid>.item.<field>}}`, `.index`, `.count`; then the
+  run carries on from `done`. Each pass is an *iteration* (`'3'`, or `'3.2'` for a loop in a
+  loop): `RunStep.iteration`, the context key `uid@3`, and its own `Idempotency-Key`, so a retry
+  picks up at the item that failed. Inside a loop a Filter skips only that item. A step can't be
+  wired both inside a loop and after it (`nodes.problems`). Limits: `LOOP_LIMIT` items,
+  `RUN_STEP_LIMIT` steps per run. Lists are never flattened into `people.0.name` fields.
 - **The canvas** (`builder.js`): steps are absolutely placed `.gnode`s, wires are SVG paths drawn
   by `drawWires()` from measured heights. Dragging from an output dot onto a step connects them
   (`connect`), onto empty canvas opens the picker there; the + on a wire inserts a step and the

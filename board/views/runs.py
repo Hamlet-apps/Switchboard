@@ -38,8 +38,8 @@ def _detail(run):
     graph = nodes.upgrade(run.steps)
     by_uid = {step['uid']: step for step in graph}
     waiting = run.status in (Run.QUEUED, Run.RUNNING)
-    steps, last, seen = [], None, set()
-    for position, result in enumerate(run.step_results.all()):
+    steps, last, seen, in_loop = [], None, set(), False
+    for position, result in enumerate(run.step_results.all()[:400]):
         step = by_uid.get(result.uid, {})
         definition = nodes.describe(step, connections) if step else {'kind': '', 'tile': {'icon': 'help'}}
         note = result.note
@@ -49,13 +49,18 @@ def _detail(run):
                 note = f'Went out of {result.note}'
             if result.tries > 1:
                 note += f' · took {result.tries} tries'
+        depth = result.iteration.count('.') + 1 if result.iteration else 0
         steps.append({'title': result.title, 'tile': definition['tile'], 'first': position == 0, 'status': result.status,
-                      'note': note, 'error': result.error, 'sent': _pretty(result.sent), 'output': _pretty(result.output)})
+                      'note': note, 'error': result.error, 'sent': _pretty(result.sent), 'output': _pretty(result.output),
+                      'depth': depth, 'item': result.iteration.split('.')[-1] if result.iteration else ''})
         last, seen = (step, result), seen | {result.uid}
+        in_loop = in_loop or bool(result.iteration)
     # What would have come next: follow the wiring on from where the run stopped, as far as
     # it is certain (an If or Switch that never ran could have gone any way).
     step = None
-    if last and last[0]:
+    if in_loop or (last and last[0] and last[0].get('node') == 'loop'):
+        pass        # with a loop in play, what "would have come next" is no longer one clear line
+    elif last and last[0]:
         if last[1].status == RunStep.OK:
             port = (last[1].output or {}).get('branch') if last[0].get('node') in nodes.BRANCHING else 'main'
             step = by_uid.get((last[0].get('next') or {}).get(port))

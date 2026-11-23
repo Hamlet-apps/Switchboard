@@ -525,7 +525,7 @@ class BranchBuilderTests(Base):
         self.assertEqual((by_uid['s']['x'], by_uid['h2']['next']), (None, {}))
         page = self.client.get(reverse('builder', args=[workflow.pk]))
         self.assertEqual([d['title'] for d in page.context['data']['catalog']['steps']['basics']],
-                         ['Filter', 'If', 'Switch', 'Send an HTTP request'])
+                         ['Filter', 'If', 'Switch', 'For each', 'Send an HTTP request'])
         self.assertContains(self.client.get(reverse('workflows')), '5 steps')
 
     def test_older_tree_workflows_still_open_and_save(self):
@@ -668,6 +668,158 @@ class ContractTests(Base):
             self.assertEqual(type_error(value, kind), '', (value, kind))
         for value, kind in ((3, 'string'), (True, 'int'), (2.5, 'int'), ('3', 'number'), (1, 'bool'), ('tomorrow', 'datetime')):
             self.assertNotEqual(type_error(value, kind), '', (value, kind))
+
+
+class LoopTests(Base):
+    """For each: the "Each item" path runs once per item, then "When done"."""
+
+    issue = 'https://pv.test/switchboard/v1/actions/staff_card.issue'
+    people = [{'id': '11', 'name': 'Ana', 'level': 1}, {'id': '12', 'name': 'Bo', 'level': 3}, {'id': '13', 'name': 'Cy', 'level': 5}]
+
+    def workflow(self, body=None, source='{{t.body.people}}'):
+        body = body or [{'uid': 'c', 'node': 'action', 'connection': self.pv.id, 'key': 'staff_card.issue', 'next': {},
+                         'params': {'staff_id': '{{l.item.id}}', 'amount': '{{l.index}}', 'label': '{{l.item.name}} of {{l.count}}'}}]
+        return Workflow.objects.create(name='Cards for all', enabled=True, steps=[
+            {'uid': 't', 'node': 'webhook', 'params': {}, 'next': {'main': 'l'}},
+            {'uid': 'l', 'node': 'loop', 'params': {'list': source}, 'next': {'each': body[0]['uid'], 'done': 'd'}},
+            *body,
+            {'uid': 'd', 'node': 'http', 'next': {}, 'params': {'method': 'POST', 'url': 'https://chat.test/send',
+                                                                 'body': 'Done {{l.count}}, last was {{l.item.name}}'}},
+        ])
+
+    def call(self, workflow, body):
+        self.client.post(reverse('workflow_hook', args=[workflow.hook_token]), json.dumps(body), content_type='application/json')
+        return workflow.runs.first()
+
+    def setUp(self):
+        super().setUp()
+        self.world.on('POST', self.issue, (200, {'card_id': '7'}))
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+
+    def test_each_item_gets_its_turn_then_the_workflow_carries_on(self):
+        run = self.call(self.workflow(), {'people': self.people})
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        sent = [c['json'] for c in self.world.to(self.issue)]
+        self.assertEqual(sent, [{'staff_id': '11', 'amount': 1.0, 'label': 'Ana of 3'},
+                                {'staff_id': '12', 'amount': 2.0, 'label': 'Bo of 3'},
+                                {'staff_id': '13', 'amount': 3.0, 'label': 'Cy of 3'}])
+        keys = [c['headers']['Idempotency-Key'] for c in self.world.to(self.issue)]
+        self.assertEqual(len(set(keys)), 3)                                   # one per item, so none is "a repeat"
+        self.assertEqual(self.world.to('https://chat.test/send')[0]['raw'], 'Done 3, last was Cy')
+        self.assertEqual([(r.uid, r.iteration) for r in run.step_results.all()],
+                         [('t', ''), ('l', ''), ('c', '1'), ('c', '2'), ('c', '3'), ('d', '')])
+        self.assertEqual(run.step_results.get(uid='l').output, {'count': 3})
+        page = self.client.get(reverse('runs'))
+        self.assertContains(page, 'item 2')
+        self.assertContains(page, '3 items')
+
+    def test_a_filter_inside_the_loop_skips_only_that_item(self):
+        check = {'uid': 'f', 'node': 'condition', 'params': {'left': '{{l.item.level}}', 'op': 'gte', 'right': '3'}, 'next': {'main': 'c'}}
+        card = {'uid': 'c', 'node': 'action', 'connection': self.pv.id, 'key': 'staff_card.issue', 'next': {},
+                'params': {'staff_id': '{{l.item.id}}', 'amount': '10'}}
+        run = self.call(self.workflow([check, card]), {'people': self.people})
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual([c['json']['staff_id'] for c in self.world.to(self.issue)], ['12', '13'])
+        skipped = run.step_results.get(uid='f', iteration='1')
+        self.assertEqual((skipped.status, skipped.note), ('stopped', "Check didn't pass, so this item was skipped"))
+        self.assertEqual(len(self.world.to('https://chat.test/send')), 1)        # "When done" still ran
+
+    def test_retry_picks_up_at_the_item_that_failed(self):
+        workflow = self.workflow()
+        self.world.on('POST', self.issue, (200, {'card_id': '1'}), (422, {'error': {'code': 'invalid_params', 'message': 'No such staff.'}}))
+        run = self.call(workflow, {'people': self.people})
+        self.assertEqual((run.status, run.failed_uid, run.error), (Run.FAILED, 'c', '422 · No such staff.'))
+        self.assertEqual(len(self.world.to(self.issue)), 2)
+        second_key = self.world.to(self.issue)[1]['headers']['Idempotency-Key']
+        self.world.on('POST', self.issue, (200, {'card_id': '2'}))
+        self.client.post(reverse('run_retry', args=[run.pk]))
+        run.refresh_from_db()
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        calls = self.world.to(self.issue)
+        self.assertEqual([c['json']['staff_id'] for c in calls], ['11', '12', '12', '13'])      # Ana wasn't done again
+        self.assertEqual(calls[2]['headers']['Idempotency-Key'], second_key)
+        self.assertEqual([(r.uid, r.iteration, r.status) for r in run.step_results.all()],
+                         [('t', '', 'ok'), ('l', '', 'ok'), ('c', '1', 'ok'), ('c', '2', 'ok'), ('c', '3', 'ok'), ('d', '', 'ok')])
+
+    def test_text_with_commas_an_empty_list_and_things_that_are_not_lists(self):
+        note = [{'uid': 'h', 'node': 'http', 'next': {}, 'params': {'method': 'POST', 'url': 'https://chat.test/item', 'body': '{{l.item}}'}}]
+        self.world.on('POST', 'https://chat.test/item', (200, {'ok': True}))
+        self.call(self.workflow(note, '{{t.body.names}}'), {'names': 'Ana, Bo,\nCy,'})
+        self.assertEqual([c['raw'] for c in self.world.to('https://chat.test/item')], ['Ana', 'Bo', 'Cy'])
+
+        run = self.call(self.workflow(), {'people': []})
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual(self.world.to('https://chat.test/send')[-1]['raw'], 'Done 0, last was ')
+
+        run = self.call(self.workflow(source='{{t.body.count}}'), {'count': 3})
+        self.assertEqual((run.status, run.error), (Run.FAILED, 'List to go through: "3" isn\'t a list.'))
+        run = self.call(self.workflow(source='{{t.body.nothing}}'), {})
+        self.assertEqual(run.error, 'List to go through is empty. Check where this step gets it from.')
+        with self.settings(LOOP_LIMIT=2):
+            run = self.call(self.workflow(), {'people': self.people})
+        self.assertEqual(run.error, 'This list has 3 items. A For each goes through at most 2.')
+
+    def test_a_loop_inside_a_loop(self):
+        inner = [
+            {'uid': 'm', 'node': 'loop', 'params': {'list': '{{l.item.shifts}}'}, 'next': {'each': 'h'}},
+            {'uid': 'h', 'node': 'http', 'next': {}, 'params': {'method': 'POST', 'url': 'https://chat.test/item',
+                                                                 'body': '{{l.item.name}} {{m.item.day}} ({{l.index}}.{{m.index}})'}},
+        ]
+        self.world.on('POST', 'https://chat.test/item', (200, {'ok': True}))
+        run = self.call(self.workflow(inner), {'people': [
+            {'name': 'Ana', 'shifts': [{'day': 'Mon'}, {'day': 'Tue'}]}, {'name': 'Bo', 'shifts': [{'day': 'Wed'}]}]})
+        self.assertEqual([c['raw'] for c in self.world.to('https://chat.test/item')], ['Ana Mon (1.1)', 'Ana Tue (1.2)', 'Bo Wed (2.1)'])
+        self.assertEqual(list(run.step_results.filter(uid='h').values_list('iteration', flat=True)), ['1.1', '1.2', '2.1'])
+        self.assertEqual(len({k for k in run.context if k.startswith('h@')}), 3)
+
+    def test_a_step_cannot_be_both_inside_the_loop_and_after_it(self):
+        workflow = self.workflow()
+        steps = workflow.steps
+        steps[2]['next'] = {'main': 'd'}        # the card step leads on into the "When done" step
+        connections = {self.th.id: self.th, self.pv.id: self.pv}
+        self.assertEqual(nodes.problems(steps, connections), [
+            '"Send an HTTP request" is wired both inside a For each and after it. Give the loop\'s two outputs their own steps.'])
+        self.assertEqual([s['uid'] for s in nodes.before(steps, 'c')], ['t', 'l'])
+        self.assertEqual(nodes.port_label(steps[1], 'each'), 'Each item')
+
+    def test_testing_the_loop_and_a_step_inside_it_in_the_builder(self):
+        workflow = self.workflow()
+        post = lambda name, body: self.client.post(reverse(f'workflow_{name}', args=[workflow.pk]), json.dumps(body),  # noqa: E731
+                                                   content_type='application/json').json()
+        Workflow.objects.filter(pk=workflow.pk).update(samples={'t': {'body': {'people': self.people}}})
+        answer = post('test_step', {'steps': workflow.steps, 'uid': 'l'})
+        self.assertEqual(answer['output'], {'item': self.people[0], 'index': 1, 'count': 3})
+        self.assertEqual(answer['note'], '3 items to go through')
+        post('test_step', {'steps': workflow.steps, 'uid': 'c'})
+        self.assertEqual(self.world.to(self.issue)[-1]['json'], {'staff_id': '11', 'amount': 1.0, 'label': 'Ana of 3'})
+        whole = post('test', {'steps': workflow.steps})
+        self.assertEqual([(s['uid'], s['status']) for s in whole['steps']], [('t', 'ok'), ('l', 'ok'), ('c', 'ok'), ('d', 'ok')])
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.samples['l'], {'item': self.people[0], 'index': 1, 'count': 3})
+        self.assertEqual(workflow.samples['c'], {'card_id': '7'})
+
+    def test_lists_in_a_manifest_are_checked(self):
+        from . import schema
+        people = {'key': 'people', 'type': 'list', 'items': [{'key': 'name', 'type': 'string', 'example': 'Ana'},
+                                                              {'key': 'level', 'type': 'int', 'example': 3}],
+                  'example': [{'name': 'Ana', 'level': 3}]}
+        good = {'actions': [{'name': 'person.search', 'kind': 'lookup', 'title': 'Search', 'params': [], 'output': [people]}]}
+        self.assertEqual(schema.manifest_problems(good), ([], []))
+        self.assertEqual(schema.mismatches([people], {'people': [{'name': 'Ana', 'level': 3}, {'name': 'Bo', 'level': 'two'}]}),
+                         ['"people" item 2: "level" should be a whole number, but was \'two\''])
+        self.assertEqual(schema.mismatches([people], {'people': 'Ana, Bo'}), ['"people" should be a list of objects, but was \'Ana, Bo\''])
+        bad = json.loads(json.dumps(good))
+        bad['actions'][0]['output'][0]['items'][0] = {'key': 'tags', 'type': 'list', 'items': [], 'example': []}
+        bad['actions'][0]['output'].append({'key': 'rows', 'type': 'list', 'example': []})
+        bad['actions'][0]['params'] = [{'key': 'ids', 'type': 'list', 'label': 'Ids'}]
+        self.assertEqual(schema.manifest_problems(bad)[0], [
+            'action "person.search": the param "ids" has no type Switchboard knows (one of string, int, number, bool, datetime, money)',
+            'action "person.search", list "people": the list "tags" is inside another list',
+            'action "person.search": the list "rows" does not say what its items hold'])
+        connection = connect({**PV_MANIFEST, 'actions': good['actions']}, 'lists.test')
+        definition = nodes.describe({'uid': 'x', 'node': 'action', 'connection': connection.id, 'key': 'person.search'},
+                                    {connection.id: connection})
+        self.assertEqual([f['key'] for f in definition['out'][0]['items']], ['name', 'level'])
 
 
 class RunawayTests(Base):

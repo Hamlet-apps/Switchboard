@@ -227,6 +227,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .run-steps li { display: flex; gap: 12px; padding-bottom: 14px; } .run-steps li:last-child { padding-bottom: 0; }
 .run-steps li.is-skipped { opacity: .55; }
 .run-steps b { font-size: 14px; font-weight: 600; color: var(--ink); display: block; } .run-steps small { font-size: 12px; color: var(--ink-3); }
+.run-steps .item-no { font-size: 11px; font-weight: 700; color: var(--ink-3); background: var(--soft-2); border-radius: 999px; padding: 1px 7px; margin-left: 4px; white-space: nowrap; }
 .run-steps .body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 .err { font-size: 12px; color: var(--ink-2); background: var(--rose-wash); border: 1px solid #ffd2e2; border-radius: 8px; padding: 8px 10px; font-family: var(--mono); line-height: 1.5; word-break: break-word; }
 .peek summary { font-size: 12px; font-weight: 600; color: var(--rose); cursor: pointer; }

@@ -85,6 +85,16 @@ BUILTIN = {
         ],
         'out': [('matched', True), ('branch', 'case'), ('case', 'is 3')],
     },
+    'loop': {
+        'icon': 'repeat', 'kind': 'Logic', 'title': 'For each',
+        'desc': 'Goes through a list. The steps wired to "Each item" run once for every item, then the workflow '
+                'carries on from "When done". Inside the loop, a Filter skips to the next item.',
+        'params': [
+            {'key': 'list', 'label': 'List to go through', 'type': 'list', 'required': True,
+             'help': 'Drop a list field here, like the people a lookup found. Text with commas in it works too.'},
+        ],
+        'out': [('item', ''), ('index', 1), ('count', 3)],
+    },
     'http': {
         'icon': 'language', 'kind': 'HTTP request', 'title': 'Send an HTTP request',
         'desc': 'Calls any URL, like a Telegram bot or another service.',
@@ -103,7 +113,7 @@ BUILTIN = {
 }
 
 TRIGGER_BASICS = ['manual', 'schedule', 'webhook', 'failure']
-STEP_BASICS = ['condition', 'if', 'switch', 'http']
+STEP_BASICS = ['condition', 'if', 'switch', 'loop', 'http']
 BRANCHING = ('if', 'switch')
 
 
@@ -117,8 +127,15 @@ def _builtin(node):
 
 
 def _fields(items):
-    return [{'key': str(f['key']), 'type': str(f.get('type') or ''), 'example': f.get('example')} for f in items or []
-            if isinstance(f, dict) and f.get('key')]
+    out = []
+    for f in items or []:
+        if not isinstance(f, dict) or not f.get('key'):
+            continue
+        field = {'key': str(f['key']), 'type': str(f.get('type') or ''), 'example': f.get('example')}
+        if field['type'] == 'list':
+            field['items'] = _fields(f.get('items'))       # what a "For each" over it offers
+        out.append(field)
+    return out
 
 
 def _limits(spec):
@@ -278,6 +295,8 @@ def ports(step):
         return ['true', 'false']
     if step.get('node') == 'switch':
         return [case['id'] for case in step.get('cases') or []] + ['default']
+    if step.get('node') == 'loop':
+        return ['each', 'done']
     return ['main']
 
 
@@ -289,6 +308,8 @@ def port_label(step, port):
     """What an output is called on the canvas and in the run log."""
     if step.get('node') == 'if':
         return 'True' if port == 'true' else 'False'
+    if step.get('node') == 'loop':
+        return 'Each item' if port == 'each' else 'When done'
     if step.get('node') != 'switch':
         return ''
     if port == 'default':
@@ -382,6 +403,18 @@ def before(steps, uid):
     return [step for step in reachable(steps) if step['uid'] in found]
 
 
+def _from(by_uid, start):
+    """Every step a run can reach from `start` (inclusive)."""
+    seen, queue = [], [start] if start else []
+    while queue:
+        uid = queue.pop(0)
+        if uid in seen or uid not in by_uid:
+            continue
+        seen.append(uid)
+        queue += [t for t in (by_uid[uid].get('next') or {}).values() if t]
+    return [by_uid[uid] for uid in seen]
+
+
 def would_loop(steps, source, target):
     """Whether wiring source -> target would let a run come back round to `source`."""
     by_uid = {step['uid']: step for step in steps}
@@ -425,6 +458,14 @@ def problems(steps, connections):
                 wrong = schema.literal_problem(param, values.get(param['key']))
                 if wrong:
                     found.append(f'"{definition["title"]}": {param["label"].lower()} {wrong}.')
+        if step.get('node') == 'loop':
+            by_uid = {s['uid']: s for s in steps}
+            inside = {s['uid'] for s in _from(by_uid, (step.get('next') or {}).get('each'))}
+            after = {s['uid'] for s in _from(by_uid, (step.get('next') or {}).get('done'))}
+            if inside & after:
+                shared = describe(by_uid[sorted(inside & after)[0]], connections)['title']
+                found.append(f'"{shared}" is wired both inside a For each and after it. '
+                             'Give the loop\'s two outputs their own steps.')
         if step.get('node') == 'switch':
             for case in step.get('cases') or []:
                 if is_empty(case.get('value')):

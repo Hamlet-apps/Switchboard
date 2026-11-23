@@ -235,6 +235,9 @@ class RunStep(models.Model):
     run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='step_results')
     index = models.PositiveIntegerField()
     uid = models.CharField(max_length=24)
+    # Which pass of a loop this was: '' outside loops, '3' for the third item, '3.2' for the
+    # second item of a loop inside that.
+    iteration = models.CharField(max_length=40, blank=True, default='')
     title = models.CharField(max_length=160)
     status = models.CharField(max_length=10)
     note = models.CharField(max_length=300, blank=True, default='')
@@ -246,4 +249,4 @@ class RunStep(models.Model):
 
     class Meta:
         ordering = ['index']
-        constraints = [models.UniqueConstraint(fields=['run', 'uid'], name='one_result_per_step')]
+        constraints = [models.UniqueConstraint(fields=['run', 'uid', 'iteration'], name='one_result_per_step')]

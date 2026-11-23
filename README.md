@@ -18,9 +18,18 @@ Free, open source and self-hosted, like the rest of the village.
   true), **If** (a True branch and a False branch), **Switch** (one branch per case, plus
   Otherwise) and **For each** (its steps run once for every item of a list, such as the
   people a lookup found, then the workflow carries on). Each of those ways out is an output you wire to whatever should happen next,
-  and two wires can lead to the same step.
+  and two wires can lead to the same step. **Stop with an error** ends a run as failed with
+  your message.
+- **Helper steps**: *Data* steps convert a value (to a number, a whole number, text, or yes/no),
+  calculate, change text, and **Set fields** (make new fields from earlier ones). *Date and
+  time* steps change a date (add or take away minutes to years), format it, and count the time
+  between two dates.
+- **When a step doesn't work**: it stops the workflow, or, if you choose, the run carries on
+  from the step's **Error** output with the error message, so you can tell someone.
 - **Fields, not code**: every step shows the data that flows into it from the steps wired
-  before it. Drag a field into a setting.
+  before it. Drag a field into a setting. When you need more, type `{{` to write an
+  expression, like `{{ price.toNumber() * 2 }}` or `{{ level >= 3 ? "Gold" : "Silver" }}`,
+  with fields dropped into it; the result shows under the setting as you type.
 - **Recipes**: ready-made workflows you switch on, such as *Staff card by volunteer level*
   and *Sync shifts to time clock*.
 - **Runs**: a plain log of every call: what started it, what each step sent and got back,

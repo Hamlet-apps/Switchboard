@@ -14,7 +14,7 @@ import datetime
 import re
 
 from .buildings import BuildingError
-from .templating import TOKEN, coerce, is_empty
+from .templating import EXPR, coerce, is_empty
 
 TYPES = ('string', 'int', 'number', 'bool', 'datetime', 'money')
 FIELD_TYPES = TYPES + ('list',)        # fields (outputs, events) may also be lists; params may not
@@ -168,7 +168,7 @@ def check_params(definition, values):
 
 def literal_problem(param, stored):
     """What is wrong with a setting that is typed in as it is (no fields dropped into it)."""
-    if not isinstance(stored, str) or is_empty(stored) or TOKEN.search(stored):
+    if not isinstance(stored, str) or is_empty(stored) or EXPR.search(stored):
         return ''
     kind = param.get('value_type') or param['type']
     if kind not in TYPES:

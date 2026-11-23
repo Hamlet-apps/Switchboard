@@ -294,7 +294,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .b-banner { background: var(--rose-soft); color: #8f0c3c; padding: 10px 16px; font-size: 14px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; flex: none; }
 .b-banner form { display: flex; gap: 8px; margin-left: auto; }
 .b-main { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
-.canvas { flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden; background-color: var(--bg); background-image: radial-gradient(#d6cbe4 1.2px, transparent 1.2px); background-size: 22px 22px; cursor: grab; touch-action: none; }
+.canvas { flex: 1 1 auto; min-width: 0; position: relative; overflow: hidden; background-color: var(--bg); background-image: radial-gradient(#d6cbe4 1.2px, transparent 1.2px); background-size: 22px 22px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
 .canvas.panning { cursor: grabbing; }
 .flow { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
 .node { width: 360px; background: #fff; border: 1px solid var(--line-2); border-radius: 16px; box-shadow: 0 1px 2px rgba(27,16,48,.05), 0 8px 24px rgba(27,16,48,.07); text-align: left; padding: 0; overflow: hidden; color: var(--ink); cursor: pointer; transition: box-shadow .16s; display: block; }
@@ -322,7 +322,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .zoom { position: absolute; left: 20px; bottom: 20px; display: flex; gap: 2px; padding: 4px; border-radius: 12px; background: #fff; border: 1px solid var(--line-2); box-shadow: 0 2px 8px rgba(27,16,48,.06); z-index: 3; }
 .zoom button { width: 36px; height: 36px; border-radius: 8px; border: 0; background: transparent; color: var(--ink-2); display: flex; align-items: center; justify-content: center; }
 .zoom button:hover { background: var(--soft); } .zoom span { min-width: 48px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--ink-2); }
-.tip { position: absolute; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 12px; background: var(--night); color: #fff; font-size: 13px; box-shadow: 0 8px 24px rgba(27,16,48,.2); z-index: 3; }
+.tip { position: absolute; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 12px; background: var(--night); color: #fff; font-size: 13px; box-shadow: 0 8px 24px rgba(27,16,48,.2); z-index: 3; pointer-events: none; }
 .tip .ms { font-size: 18px; color: var(--pink); }
 /* picker */
 .picker { flex: 0 0 420px; max-width: 100%; background: #fff; border-left: 1px solid var(--line-2); box-shadow: -12px 0 32px rgba(27,16,48,.06); display: flex; flex-direction: column; min-height: 0; z-index: 4; }
@@ -343,6 +343,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .pick-heading { margin: 10px 10px 2px; font-size: 11px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--ink-3); }
 .pick-heading:first-child { margin-top: 2px; }
 .pick-events button:hover { background: var(--rose-soft); font-weight: 700; } .pick-events .ms { font-size: 18px; color: var(--mute); } .pick-events button:hover .ms { color: var(--rose); }
+.pick-events.described button { align-items: flex-start; padding: 8px 10px; } .pick-events.described .ms { margin-top: 1px; }
+.pick-events.described b { display: block; font-size: 13px; font-weight: 700; } .pick-events.described small { display: block; margin-top: 1px; font-size: 12px; font-weight: 400; color: var(--ink-3); line-height: 1.4; }
+.pick-events.described button:hover { font-weight: 500; }
 /* node editor */
 .veil { position: absolute; inset: 0; z-index: 20; background: rgba(27,16,48,.55); padding: 24px; display: flex; align-items: stretch; justify-content: center; }
 .editor { flex: 1 1 auto; max-width: 1360px; background: #fff; border-radius: 26px; box-shadow: 0 30px 80px rgba(13,6,26,.45); overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
@@ -439,6 +442,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .gnode > .out .port:hover, .gnode > .out.wired .port { border-color: var(--rose); } .gnode > .out .port:hover { background: var(--rose-soft); transform: scale(1.25); }
 .port-label { margin-top: 6px; height: 22px; line-height: 22px; padding: 0 8px; border-radius: 999px; background: var(--green-soft); color: var(--green); font-size: 11.5px; font-weight: 700; display: block; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: none; position: relative; z-index: 2; }
 .port-label.quiet { background: var(--soft-2); color: var(--ink-2); }
+.port-label.err { background: var(--rose-soft); color: var(--rose-ink); }
 .gnode > .out .plus { margin-top: 22px; flex: none; position: relative; }
 .gnode > .out .plus::before { content: ''; position: absolute; left: 50%; bottom: 100%; width: 2px; height: 22px; margin-left: -1px; background: var(--lilac-2); }
 .gnode > .out .port-label + .plus { margin-top: 14px; } .gnode > .out .port-label + .plus::before { height: 14px; }
@@ -456,6 +460,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .add-trigger { position: absolute; }
 .rule input.name { flex: 1 1 80px; width: 80px; }
 .rule .x[disabled] { opacity: .35; cursor: default; }
+.table.fields .rule { flex-wrap: nowrap; align-items: flex-start; }
+.table.fields input.name { flex: 0 0 150px; width: 150px; margin-top: 2px; font-family: var(--mono); font-size: 13px; }
+.table.fields .eq { line-height: 40px; color: var(--mute); font-family: var(--mono); }
+.table.fields .slot { flex: 1 1 auto; min-height: 40px; padding: 5px 10px; border-radius: 10px; } .table.fields .slot:focus, .table.fields .slot.over { padding: 4px 9px; }
+.table.fields .x { margin-top: 4px; flex: none; }
 @media (max-width: 900px) {
   .picker { position: absolute; inset: 0; flex-basis: auto; }
   .veil { padding: 0; } .editor { border-radius: 0; }
@@ -478,3 +487,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @keyframes sbglow { 50% { box-shadow: 0 0 0 7px rgba(255,79,139,.22), 0 10px 26px rgba(27,16,48,.1); } }
 .node-bar.listen { background: var(--pink); color: var(--night); }
 @media (prefers-reduced-motion: reduce) { .live-dot::after, .out-listen .pulse::after { animation: none; opacity: 0; } }
+/* expressions: the result under a setting, and the cheat sheet */
+.expr-preview { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; font-size: 12.5px; color: var(--green); font-family: var(--mono); word-break: break-word; }
+.expr-preview .ms { font-size: 16px; flex: none; } .expr-preview.bad { color: var(--rose-ink); }
+.expr-help { margin-top: 4px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--soft); font-size: 13px; color: var(--ink-2); }
+.expr-help summary { display: flex; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; font-weight: 600; color: var(--ink); }
+.expr-help summary .ms { font-size: 18px; color: var(--rose); }
+.expr-help p { margin: 0 12px 10px; line-height: 1.5; }
+.expr-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.expr-help dt { font-family: var(--mono); font-size: 12px; color: #8f0c3c; } .expr-help dd { margin: 0; }
+.table.fields .cell { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }

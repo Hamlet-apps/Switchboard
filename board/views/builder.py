@@ -14,7 +14,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from .. import engine, nodes, worker
+from .. import engine, expressions, nodes, templating, worker
 from ..buildings import BuildingError
 from ..models import Connection, Event, Folder, Run, Secret, Settings, Workflow
 from ..templating import MAP_OPS
@@ -64,13 +64,27 @@ def _clean_cases(raw):
     cases, ids = [], set()
     for case in raw if isinstance(raw, list) else []:
         key = str(case.get('id', '')) if isinstance(case, dict) else ''
-        if key in ('default', 'main', 'true', 'false', 'each', 'done') or not UID.match(key) or key in ids or len(cases) >= 12:
+        if key in ('default', 'main', 'true', 'false', 'each', 'done', 'error') or not UID.match(key) or key in ids or len(cases) >= 12:
             continue
         ids.add(key)
         op = case.get('op') if case.get('op') in dict(MAP_OPS) else 'eq'
         cases.append({'id': key, 'op': op, 'value': str(case.get('value', ''))[:500],
                       'value2': str(case.get('value2', ''))[:500], 'label': str(case.get('label', ''))[:60]})
     return cases or nodes.new_cases()
+
+
+FIELD_NAME = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_ .-]{0,79}$')
+
+
+def _clean_fields(raw):
+    """Set fields rows: a name (a dotted name makes a nested field) and a value."""
+    fields = []
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, dict) or len(fields) >= 50:
+            continue
+        name = '.'.join(part.strip() for part in str(row.get('name') or '').split('.')).strip()
+        fields.append({'name': name if FIELD_NAME.match(name) else '', 'value': str(row.get('value') or '')[:20_000]})
+    return fields
 
 
 def _number(value):
@@ -100,6 +114,10 @@ def clean_steps(raw):
                 'x': _number(item.get('x')), 'y': _number(item.get('y')), 'next': {}}
         if node == 'switch':
             step['cases'] = _clean_cases(item.get('cases'))
+        if node == 'set':
+            step['fields'] = _clean_fields(item.get('fields'))
+        if node in nodes.CAN_FAIL_ON and item.get('on_error') == 'branch':
+            step['on_error'] = 'branch'
         step['_wires'] = item.get('next') if isinstance(item.get('next'), dict) else {}
         steps.append(step)
     steps.sort(key=lambda step: step['node'] not in nodes.TRIGGERS)     # stable: the trigger first
@@ -161,9 +179,11 @@ def builder(request, pk):
         'testHookUrl': request.build_absolute_uri(reverse('workflow_hook_test', args=[workflow.hook_token])),
         'secrets': [s.name for s in Secret.objects.all()],
         'mapOps': [{'value': v, 'label': l} for v, l in MAP_OPS],
+        'builtins': list(nodes.BUILTIN),
         'problems': nodes.problems(workflow.steps, by_id) if workflow.steps else [],
         'urls': {name: reverse(f'workflow_{name}', args=[workflow.pk])
-                 for name in ('save', 'toggle', 'test', 'test_step', 'listen', 'run')},
+                 for name in ('save', 'toggle', 'test', 'test_step', 'listen', 'run', 'preview')},
+        'expressionHelp': expressions.help_rows(),
         'buildingsUrl': reverse('buildings'),
         'openPicker': not workflow.steps,
     }
@@ -204,6 +224,12 @@ def _sample_context(workflow, earlier, connections):
             definition = nodes.describe(step, connections)
             if index == 0:
                 sample = engine.trigger_sample(workflow, step, definition)[0]
+            elif step['node'] in nodes.TRANSFORMS:
+                # These only work values out, so the real answer costs nothing.
+                try:
+                    sample = engine.perform(step, definition, ctx, connections, {}, '')[0]
+                except BuildingError:
+                    sample = nodes.example_output(definition)
             elif step['node'] == 'loop':
                 # Inside a loop, steps see its first item: go through the list as it stands in the samples.
                 try:
@@ -246,10 +272,32 @@ def workflow_test_step(request, workflow, body):
             output = {'passed': False}
             result = {'ok': True, 'output': output, 'real': True, 'stopped': True}
         except BuildingError as error:
-            return JsonResponse({'ok': False, 'error': engine._redact(str(error), secrets_)})
+            message = engine._redact(str(error), secrets_)
+            if not nodes.on_error_output(step):
+                return JsonResponse({'ok': False, 'error': message})
+            # Not kept as its sample: the steps on its main output would get the error instead.
+            return JsonResponse({'ok': True, 'output': nodes.error_output(message), 'real': True, 'took': 'Error',
+                                 'error': message, 'ms': int((time.monotonic() - began) * 1000)})
     Workflow.objects.filter(pk=workflow.pk).update(samples={**workflow.samples, step['uid']: output})
     result['ms'] = int((time.monotonic() - began) * 1000)
     return JsonResponse(result)
+
+
+@json_call
+def workflow_preview(request, workflow, body):
+    """What a setting with expressions in it comes to, on the sample data of the steps before."""
+    connections = _connections()
+    steps = clean_steps(body.get('steps'))
+    step = nodes.find(steps, body.get('uid'))
+    if step is None:
+        return JsonResponse({'error': "That step isn't in the workflow any more."}, status=400)
+    ctx = _sample_context(workflow, nodes.before(steps, step['uid']), connections)
+    hidden = {s.name: '••••' for s in Secret.objects.all()}
+    try:
+        value = templating.resolve(str(body.get('value') or '')[:20_000], ctx, hidden)
+    except expressions.ExpressionError as error:
+        return JsonResponse({'ok': False, 'error': str(error)})
+    return JsonResponse({'ok': True, 'value': value, 'shown': templating.text(value)[:500]})
 
 
 # How long the webhook's test URL stays open after the builder last asked. The builder asks

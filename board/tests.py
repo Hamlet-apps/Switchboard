@@ -10,9 +10,9 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from . import buildings, engine, middleware, nodes, recipes, templating, worker
+from . import buildings, engine, expressions, middleware, nodes, recipes, templating, transform, worker
 from .buildings import BuildingError
-from .models import Connection, Event, Folder, Run, Secret, Settings, Workflow
+from .models import Connection, Event, Folder, Run, RunStep, Secret, Settings, Workflow
 
 TH_MANIFEST = {
     'protocol': '1', 'building': 'town-hall', 'name': 'Town Hall', 'instance': 'Cathedral',
@@ -525,7 +525,10 @@ class BranchBuilderTests(Base):
         self.assertEqual((by_uid['s']['x'], by_uid['h2']['next']), (None, {}))
         page = self.client.get(reverse('builder', args=[workflow.pk]))
         self.assertEqual([d['title'] for d in page.context['data']['catalog']['steps']['basics']],
-                         ['Filter', 'If', 'Switch', 'For each', 'Send an HTTP request'])
+                         ['Filter', 'If', 'Switch', 'For each', 'Stop with an error', 'Set fields',
+                          'Convert to a number', 'Convert to a whole number', 'Convert to text', 'Convert to yes or no',
+                          'Calculate', 'Change text', 'Change a date', 'Format a date', 'Time between dates',
+                          'Send an HTTP request'])
         self.assertContains(self.client.get(reverse('workflows')), '5 steps')
 
     def test_older_tree_workflows_still_open_and_save(self):
@@ -1248,3 +1251,284 @@ class BuilderTests(Base):
         workflow = self.recipe()
         self.client.logout()
         self.assertEqual(self.post('save', workflow, {}).status_code, 401)
+
+
+class TransformTests(TestCase):
+    """The Data and Date and time steps, on their own."""
+
+    # A zone that still changes its clocks (British Columbia stays on daylight time from 2026).
+    zone = zoneinfo.ZoneInfo('America/Los_Angeles')
+
+    def test_conversions(self):
+        self.assertEqual([transform.to_number(v) for v in ('12.50', '$1,200', 3, '7')], [12.5, 1200, 3, 7])
+        with self.assertRaisesMessage(ValueError, '"abc" is not a number'):
+            transform.to_number('abc')
+        self.assertEqual([transform.to_integer('2.5'), transform.to_integer('2.9', 'down'), transform.to_integer('2.1', 'up'),
+                          transform.to_integer('-2.5')], [3, 2, 3, -3])
+        with self.assertRaisesMessage(ValueError, 'not a whole number'):
+            transform.to_integer('2.5', 'exact')
+        self.assertEqual([transform.to_text(12.5, 2), transform.to_text(1234567.891, None, True), transform.to_text('007'),
+                          transform.to_text(3.0), transform.to_text(True), transform.to_text({'a': 1}), transform.to_text(1200, 0, True)],
+                         ['12.50', '1,234,567.891', '007', '3', 'true', '{"a": 1}', '1,200'])
+        self.assertEqual([transform.to_bool(v) for v in ('Yes', 'off', 1, 0, True, ' TRUE ')], [True, False, True, False, True, True])
+        with self.assertRaisesMessage(ValueError, "isn't yes or no"):
+            transform.to_bool('maybe')
+
+    def test_calculate_and_change_text(self):
+        self.assertEqual(transform.calculate('0.1', 'add', '0.2'), 0.3)          # no floating-point slop
+        self.assertEqual(transform.calculate(10, 'divide', 4), 2.5)
+        self.assertEqual(transform.calculate(10, 'divide', 3), 3.333333333333)
+        self.assertEqual(transform.calculate(10, 'remainder', 3), 1)
+        self.assertEqual(transform.calculate('2.675', 'round', places=2), 2.68)
+        with self.assertRaisesMessage(ValueError, "Can't divide by zero"):
+            transform.calculate(1, 'divide', 0)
+        self.assertEqual(transform.change_text("maria o'neil-KOWALSKI", 'title'), "Maria O'neil-Kowalski")
+        self.assertEqual(transform.change_text('  lots   of  space ', 'trim'), 'lots of space')
+        self.assertEqual(transform.change_text('Cafe and Cafe', 'replace', 'Cafe', 'Café'), 'Café and Café')
+        self.assertEqual(transform.change_text('Pavilion', 'first', length=3), 'Pav')
+
+    def test_reading_dates(self):
+        read = lambda v: transform.read_date(v, self.zone).iso()  # noqa: E731
+        self.assertEqual(read('2026-11-28T09:00:00-08:00'), '2026-11-28T09:00:00-08:00')
+        self.assertEqual(read('2026-11-28T17:00:00Z'), '2026-11-28T09:00:00-08:00')      # into our zone
+        self.assertEqual(read('2026-11-28 09:00'), '2026-11-28T09:00:00-08:00')          # no zone: ours
+        self.assertEqual(read('2026-11-28'), '2026-11-28')
+        self.assertEqual(read('Nov 28, 2026'), '2026-11-28')
+        self.assertEqual(read('Monday, November 23, 2026'), '2026-11-23')
+        self.assertEqual(read('11/28/2026'), '2026-11-28')
+        self.assertEqual(read('28/11/2026'), '2026-11-28')                               # can only be day first
+        self.assertEqual(read(1795449600), '2026-11-23T08:00:00-08:00')
+        self.assertEqual(read('1795449600000'), '2026-11-23T08:00:00-08:00')             # milliseconds
+        with self.assertRaisesMessage(ValueError, '"next Tuesday" isn\'t a date Switchboard can read'):
+            read('next Tuesday')
+
+    def test_changing_dates(self):
+        change = lambda *a: transform.change_date(a[0], self.zone, *a[1:])  # noqa: E731
+        self.assertEqual(change('2026-11-28T09:00:00-08:00', 'subtract', 2, 'days'), '2026-11-26T09:00:00-08:00')
+        self.assertEqual(change('2026-11-28', 'add', 1, 'weeks'), '2026-12-05')                 # a date stays a date
+        self.assertEqual(change('2026-01-31', 'add', 1, 'months'), '2026-02-28')                # no February 31st
+        self.assertEqual(change('2028-02-29', 'add', 1, 'years'), '2029-02-28')
+        self.assertEqual(change('2026-11-28', 'add', 90, 'minutes'), '2026-11-28T01:30:00-08:00')
+        # Over the clock change: a day later is the same time on the clock, 24 hours later is not.
+        self.assertEqual(change('2026-03-07T09:00:00-08:00', 'add', 1, 'days'), '2026-03-08T09:00:00-07:00')
+        self.assertEqual(change('2026-03-07T09:00:00-08:00', 'add', 24, 'hours'), '2026-03-08T10:00:00-07:00')
+        with self.assertRaisesMessage(ValueError, 'Use a whole number of months'):
+            change('2026-01-31', 'add', 1.5, 'months')
+
+    def test_formatting_and_counting(self):
+        when = '2026-11-23T20:05:00-08:00'
+        formats = {key: transform.format_date(when, self.zone, key) for key, _ in transform.FORMATS}
+        self.assertEqual(formats, {
+            'iso': '2026-11-23T20:05:00-08:00', 'date': '2026-11-23', 'short': 'Nov 23, 2026',
+            'long': 'Monday, November 23, 2026', 'datetime': 'Nov 23, 2026, 8:05 PM', 'mdy': '11/23/2026',
+            'dmy': '23/11/2026', 'time': '8:05 PM', 'time24': '20:05', 'weekday': 'Monday', 'month': 'November',
+            'year': 2026, 'unix': 1795493100})
+        for key in ('short', 'long', 'datetime', 'mdy', 'iso'):            # what it writes, it can read back
+            transform.read_date(formats[key], self.zone)
+        self.assertEqual(transform.format_choices()[2], {'value': 'short', 'label': 'Nov 23, 2026'})
+        count = lambda a, b, unit: transform.between(a, b, self.zone, unit)  # noqa: E731
+        self.assertEqual(count('2026-11-23', '2026-11-28', 'days'), 5)
+        self.assertEqual(count('2026-11-28', '2026-11-23', 'days'), -5)
+        self.assertEqual(count('2026-11-23T20:00:00-08:00', '2026-11-24T08:00:00-08:00', 'days'), 0)
+        self.assertEqual(count('2026-11-23T20:00:00-08:00', '2026-11-24T08:00:00-08:00', 'hours'), 12)
+        self.assertEqual(count('1990-12-01', '2026-11-23', 'years'), 35)
+        self.assertEqual(count('2026-01-31', '2026-02-28', 'months'), 1)       # as Change a date counts: Jan 31 + 1 month
+        self.assertEqual(count('2026-01-31', '2026-03-01', 'months'), 1)
+
+
+class HelperStepTests(Base):
+    """The Data and Date steps in a workflow, and the Error output."""
+
+    chat = 'https://chat.test/send'
+
+    def run_steps(self, *steps):
+        trigger = {'uid': 't', 'node': 'webhook', 'params': {}}
+        if any('next' in step for step in steps):        # wired by hand: the trigger leads to the first
+            trigger['next'] = {'main': steps[0]['uid']}
+        workflow = Workflow.objects.create(name='Helpers', enabled=True, steps=[trigger, *steps])
+        run = engine.start_run(workflow, {'body': {'points': '41.6', 'when': '2026-11-28T09:00:00-08:00',
+                                                    'first': 'maria', 'last': 'KOWALSKI'}}, 'Test')
+        return engine.execute(run)
+
+    def test_steps_feed_each_other(self):
+        self.world.on('POST', self.chat, (200, {'ok': True}))
+        run = self.run_steps(
+            {'uid': 'n', 'node': 'to_integer', 'params': {'value': '{{t.body.points}}', 'rounding': 'up'}},
+            {'uid': 'c', 'node': 'calculate', 'params': {'value': '{{n.value}}', 'op': 'multiply', 'by': '2'}},
+            {'uid': 'd', 'node': 'date_change', 'params': {'date': '{{t.body.when}}', 'direction': 'subtract',
+                                                           'amount': '2', 'unit': 'days'}},
+            {'uid': 'f', 'node': 'date_format', 'params': {'date': '{{d.value}}', 'format': 'long'}},
+            {'uid': 's', 'node': 'set', 'params': {}, 'fields': [
+                {'name': 'person.name', 'value': '{{t.body.first}} {{t.body.last}}'},
+                {'name': 'points', 'value': '{{c.value}}'}, {'name': '', 'value': 'ignored'}]},
+            {'uid': 'h', 'node': 'http', 'params': {'method': 'POST', 'url': self.chat,
+                                                    'body': '{"points": {{s.points}}, "remind": "{{f.value}}"}'}},
+        )
+        self.assertEqual(run.status, Run.SUCCEEDED, run.error)
+        self.assertEqual((run.context['n'], run.context['c']), ({'value': 42}, {'value': 84}))
+        self.assertEqual(run.context['s'], {'person': {'name': 'maria KOWALSKI'}, 'points': 84})   # one token keeps the number
+        self.assertEqual(self.world.to(self.chat)[0]['json'], {'points': 84, 'remind': 'Thursday, November 26, 2026'})
+
+    def test_a_step_that_does_not_work_fails_the_run_by_default(self):
+        run = self.run_steps({'uid': 'n', 'node': 'to_number', 'params': {'value': '{{t.body.first}}'}})
+        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, 'n'))
+        self.assertEqual(run.error, '"maria" is not a number.')
+
+    def test_the_error_output_carries_on_with_the_message(self):
+        self.world.on('POST', self.chat, (200, {'ok': True}))
+        self.world.on('POST', 'https://down.test/', (503, b'busy'))
+        run = self.run_steps(
+            {'uid': 'n', 'node': 'to_number', 'params': {'value': '{{t.body.first}}'}, 'on_error': 'branch',
+             'next': {'main': 'ok', 'error': 'h'}},
+            {'uid': 'ok', 'node': 'http', 'params': {'url': 'https://never.test/'}},
+            {'uid': 'h', 'node': 'http', 'params': {'url': 'https://down.test/'}, 'on_error': 'branch',
+             'next': {'error': 'tell'}},
+            {'uid': 'tell', 'node': 'http', 'params': {'url': self.chat, 'body': '{{n.error}} / {{h.error}}'}},
+        )
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'n', 'h', 'tell'])
+        self.assertEqual(self.world.to('https://never.test/'), [])
+        self.assertEqual(len(self.world.to('https://down.test/')), 3)                 # retried before giving up
+        self.assertIn('"maria" is not a number. / ', self.world.to(self.chat)[0]['raw'])
+        step = run.step_results.get(uid='n')
+        self.assertEqual((step.status, step.error, step.note),
+                         (RunStep.OK, '"maria" is not a number.', "Didn't work, so it went out of Error"))
+        page = self.client.get(reverse('runs') + f'?run={run.pk}&tests=1')
+        self.assertContains(page, 'Didn&#x27;t work, so it went out of Error')
+        # Nothing failed, so there is nothing to retry.
+        self.assertFalse(engine.retry(run))
+
+    def test_an_error_output_that_leads_nowhere_ends_the_run_quietly(self):
+        run = self.run_steps({'uid': 'n', 'node': 'to_bool', 'params': {'value': 'maybe'}, 'on_error': 'branch'})
+        self.assertEqual(run.status, Run.SUCCEEDED)
+
+    def test_stop_with_an_error(self):
+        run = self.run_steps({'uid': 'x', 'node': 'fail', 'params': {'message': '{{t.body.first}} is not in Pavilion'}})
+        self.assertEqual((run.status, run.error, run.failed_uid), (Run.FAILED, 'maria is not in Pavilion', 'x'))
+        self.assertEqual(nodes.ports({'node': 'fail'}), [])
+
+    def post(self, name, workflow, body):
+        return self.client.post(reverse(f'workflow_{name}', args=[workflow.pk]), json.dumps(body),
+                                content_type='application/json')
+
+    def test_builder_keeps_the_new_settings_and_tests_them(self):
+        workflow = Workflow.objects.create(name='New')
+        steps = [
+            {'uid': 't', 'node': 'manual', 'params': {}, 'next': {'main': 's'}},
+            {'uid': 's', 'node': 'set', 'params': {}, 'next': {'main': 'n'}, 'on_error': 'branch',
+             'fields': [{'name': ' who ', 'value': '{{t.started_by}}'}, {'name': 'bad{{name}}', 'value': 'x'}, 'junk']},
+            {'uid': 'n', 'node': 'to_number', 'params': {'value': '{{s.who}}'}, 'on_error': 'branch',
+             'next': {'main': 'i', 'error': 'h'}},
+            {'uid': 'i', 'node': 'if', 'params': {'left': '1'}, 'on_error': 'branch', 'next': {'true': 'h', 'error': 'h'}},
+            {'uid': 'h', 'node': 'http', 'params': {'url': 'https://a.test', 'body': '{{n.error}}'}},
+        ]
+        answer = self.post('save', workflow, {'steps': steps}).json()
+        self.assertEqual(answer['problems'], [])
+        workflow.refresh_from_db()
+        by_uid = {s['uid']: s for s in workflow.steps}
+        self.assertEqual(by_uid['s']['fields'], [{'name': 'who', 'value': '{{t.started_by}}'}, {'name': '', 'value': 'x'}])
+        self.assertEqual((by_uid['n']['on_error'], by_uid['n']['next']), ('branch', {'main': 'i', 'error': 'h'}))
+        self.assertNotIn('on_error', by_uid['i'])                   # an If has no Error output
+        self.assertEqual(by_uid['i']['next'], {'true': 'h'})
+        # Set fields is worked out on the trigger's sample, so the step after it tests with real values.
+        answer = self.post('test_step', workflow, {'steps': workflow.steps, 'uid': 'n'}).json()
+        self.assertEqual((answer['ok'], answer['took'], answer['output']),
+                         (True, 'Error', {'error': '"Andrew" is not a number.', 'branch': 'error'}))
+        answer = self.post('test_step', workflow, {'steps': workflow.steps, 'uid': 's'}).json()
+        self.assertEqual(answer['output'], {'who': 'Andrew'})
+        steps[1]['fields'] = []
+        answer = self.post('save', workflow, {'steps': steps}).json()
+        self.assertEqual(answer['problems'], ['"Set fields" needs at least one field with a name.'])
+
+    def test_picker_lists_the_steps_under_their_headings(self):
+        workflow = Workflow.objects.create(name='New')
+        data = self.client.get(reverse('builder', args=[workflow.pk])).context['data']
+        steps = data['catalog']['steps']
+        self.assertEqual([c['name'] for c in steps['categories']], ['Logic', 'Data', 'Date and time', 'Web'])
+        groups = {d['id']: d['group'] for d in steps['basics']}
+        self.assertEqual((groups['if'], groups['to_text'], groups['date_between'], groups['http']),
+                         ('Logic', 'Data', 'Date and time', 'Web'))
+        self.assertIn('date_format', data['builtins'])
+        self.assertTrue(data['defs']['to_number']['can_fail_on'])
+        self.assertFalse(data['defs']['switch']['can_fail_on'])
+
+
+class ExpressionTests(Base):
+    """What can go between {{ and }} besides one field."""
+
+    ctx = {'s1': {'price': '12.50', 'qty': 3, 'first': 'maria', 'last': 'KOWALSKI', 'tags': ['a', 'b'],
+                  'first name': 'Ana', 'when': '2026-11-28T09:00:00-08:00', 'paid': True, 'empty': ''},
+           't': {'body': {'level': 4}}}
+
+    def value(self, text):
+        return templating.resolve(text, self.ctx, {'BOT': 'k3y'})
+
+    def test_arithmetic_text_and_choices(self):
+        self.assertEqual(self.value('{{ s1.price.toNumber() * s1.qty }}'), 37.5)
+        self.assertEqual(self.value('{{ s1.qty * 2 + 1 }}'), 7)                      # * before +
+        self.assertEqual(self.value('{{ (s1.qty + 1) * 2 }}'), 8)
+        self.assertEqual(self.value('{{ 10 / 4 }}  {{ 10 % 4 }}  {{ -s1.qty }}'), '2.5  2  -3')
+        self.assertEqual(self.value('{{ s1.price - 0.5 }}'), 12)                      # - turns text into numbers
+        self.assertEqual(self.value('{{ s1.first.title() + " " + s1.last.title() }}'), 'Maria Kowalski')
+        self.assertEqual(self.value('{{ t.body.level >= 3 ? "Gold" : "Silver" }}'), 'Gold')
+        self.assertEqual(self.value('{{ s1.paid and not s1.empty }}'), True)
+        self.assertEqual(self.value('{{ s1.empty.ifEmpty("n/a") }}'), 'n/a')
+        self.assertEqual(self.value('{{ s1["first name"].upper() }}'), 'ANA')
+        self.assertEqual(self.value('{{ s1.tags.join(" & ") }} / {{ s1.tags.length() }} / {{ s1.tags.0 }}'), 'a & b / 2 / a')
+        self.assertEqual(self.value('{{ "2.4".toInt() }}'), 2)
+        self.assertEqual(self.value('{{ secret.BOT }}'), 'k3y')
+        self.assertEqual(self.value('{{ s1.when.minus(2, "days").format("long") }}'), 'Thursday, November 26, 2026')
+        self.assertEqual(self.value('{{ "2026-11-23".until(s1.when, "day") }}'), 5)
+
+    def test_one_field_is_still_a_field(self):
+        self.assertEqual(self.value('{{s1.qty}}'), 3)
+        self.assertEqual(self.value('{{ s1.first name }}'), 'Ana')                    # an old chip with a space
+        self.assertEqual(templating.tokens_in('{{s1.qty}} {{ s1.price.toNumber() * t.body.level }}'),
+                         [('s1', 'qty'), ('s1', 'price'), ('t', 'body.level')])
+        self.assertEqual(templating.expressions_in('{{s1.qty}} and {{ s1.qty + 1 }}'), [' s1.qty + 1 '])
+
+    def test_mistakes_say_what_is_wrong(self):
+        for text, message in [
+            ('{{ s1.first * 2 }}', '"maria" is not a number'),
+            ('{{ s1.qty / 0 }}', "Can't divide by zero"),
+            ('{{ s1.qty.explode() }}', 'There is no method called .explode()'),
+            ('{{ s1.qty + }}', 'the expression ends too soon'),
+            ('{{ s1.price.round(1, 2) }}', '.round() takes 0 to 1 values'),
+            ('{{ __import__("os") }}', 'There is no function called __import__()'),
+            ('{{ s1.when.plus(1, "fortnight") }}', '"fortnight" isn\'t a unit'),
+        ]:
+            with self.subTest(text), self.assertRaisesMessage(expressions.ExpressionError, message):
+                self.value(text)
+
+    def test_in_a_run_and_before_saving(self):
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+        workflow = Workflow.objects.create(name='Sums', enabled=True, steps=[
+            {'uid': 't', 'node': 'webhook', 'params': {}},
+            {'uid': 's', 'node': 'set', 'params': {}, 'fields': [
+                {'name': 'total', 'value': '{{ t.body.price.toNumber() * t.body.qty }}'},
+                {'name': 'who', 'value': 'For {{ t.body.name.title() }}'}]},
+            {'uid': 'h', 'node': 'http', 'params': {'url': 'https://chat.test/send', 'body': '{"total": {{ s.total + 1 }}}'}},
+        ])
+        run = engine.execute(engine.start_run(workflow, {'body': {'price': '2.5', 'qty': 4, 'name': 'ana'}}, 'Test'))
+        self.assertEqual(run.status, Run.SUCCEEDED, run.error)
+        self.assertEqual(run.context['s'], {'total': 10, 'who': 'For Ana'})
+        self.assertEqual(self.world.to('https://chat.test/send')[0]['json'], {'total': 11})
+        run = engine.execute(engine.start_run(workflow, {'body': {'price': 'free', 'qty': 4}}, 'Test'))
+        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, 's'))
+        self.assertIn('In {{ t.body.price.toNumber() * t.body.qty }}: "free" is not a number', run.error)
+        steps = workflow.steps + [{'uid': 'x', 'node': 'http', 'params': {'url': 'https://a.test', 'body': '{{ s.total * }} {{ nope.thing + 1 }}'}}]
+        self.assertEqual(nodes.problems(steps, {}), [
+            '"Send an HTTP request": {{ s.total * }} can\'t be read. the expression ends too soon.',
+            '"Send an HTTP request": {{ nope.thing + 1 }} uses "nope", which isn\'t a step in this workflow. '
+            'Drag the field in from the left instead.'])
+
+    def test_preview_in_the_builder(self):
+        workflow = Workflow.objects.create(name='New')
+        steps = [{'uid': 't', 'node': 'manual', 'params': {}, 'next': {'main': 'h'}},
+                 {'uid': 'h', 'node': 'http', 'params': {'url': 'https://a.test'}}]
+        ask = lambda value: self.client.post(reverse('workflow_preview', args=[workflow.pk]), json.dumps(  # noqa: E731
+            {'steps': steps, 'uid': 'h', 'value': value}), content_type='application/json').json()
+        self.assertEqual(ask('Hi {{ t.started_by.upper() }}'), {'ok': True, 'value': 'Hi ANDREW', 'shown': 'Hi ANDREW'})
+        self.assertEqual(ask('{{ t.started_by * 2 }}')['ok'], False)
+        page = self.client.get(reverse('builder', args=[workflow.pk])).context['data']
+        self.assertIn(('.toNumber()', '"12.50".toNumber() is 12.5'), page['expressionHelp'])

@@ -6,11 +6,19 @@ key into that step's output; `{{secret.NAME}}` reads a stored secret), or a look
     {"map": {"on": "{{s1.level}}", "rules": [{"op": "lte", "value": "2", "then": "5"}], "else": ""}}
 
 A setting that is exactly one token keeps the value's type (a number stays a number).
+
+Anything else between {{ and }} is an expression (`expressions.py`): {{ s1.price * 2 }}.
 """
 import re
 from decimal import Decimal, InvalidOperation
 
-TOKEN = re.compile(r'\{\{\s*([A-Za-z0-9_]+)\.([^{}]+?)\s*\}\}')
+# A field: {{uid.path}}. Its path has none of the characters an expression is made of (and no
+# " - ", " and ", " or ", " not "), so {{ s1.price - 1 }} is an expression while {{ s1.first name }} is still a field.
+_PATH = r"""([A-Za-z0-9_]+)\.((?:(?!\s(?:-|and|or|not)\s)[^{}()+*/%<>=!?:,"'\[\]|&])+?)"""
+TOKEN = re.compile(r'\{\{\s*' + _PATH + r'\s*\}\}')
+PLAIN = re.compile(r'\s*' + _PATH + r'\s*')
+# Anything between {{ and }}: a field or an expression.
+EXPR = re.compile(r'\{\{([^{}]+?)\}\}')
 
 OPS = [
     ('eq', 'is'),
@@ -101,16 +109,42 @@ def _lookup(src, path, ctx, secrets):
     return dig(ctx.get(src), path)
 
 
+def _value(inner, ctx, secrets):
+    """What one {{ … }} stands for. Raises expressions.ExpressionError when it can't be worked out."""
+    plain = PLAIN.fullmatch(inner)
+    if plain:
+        return _lookup(plain.group(1), plain.group(2).strip(), ctx, secrets)
+    from . import expressions
+    try:
+        return expressions.evaluate(inner, ctx, secrets)
+    except expressions.ExpressionError as error:
+        message = str(error).rstrip('.')
+        raise expressions.ExpressionError(f'In {{{{{inner}}}}}: {message}.')
+
+
 def resolve(value, ctx, secrets=None):
     """A setting's stored value -> the real one."""
     if isinstance(value, dict) and 'map' in value:
         return _resolve_map(value['map'] or {}, ctx, secrets)
     if not isinstance(value, str):
         return value
-    whole = TOKEN.fullmatch(value.strip())
+    whole = EXPR.fullmatch(value.strip())
     if whole:
-        return _lookup(whole.group(1), whole.group(2), ctx, secrets)
-    return TOKEN.sub(lambda m: text(_lookup(m.group(1), m.group(2), ctx, secrets)), value)
+        return _value(whole.group(1), ctx, secrets)
+    return EXPR.sub(lambda m: text(_value(m.group(1), ctx, secrets)), value)
+
+
+def expressions_in(value):
+    """The text inside each {{ … }} of a stored setting that is an expression, not one field."""
+    found = []
+    if isinstance(value, dict) and 'map' in value:
+        spec = value['map'] or {}
+        for part in [spec.get('on', ''), spec.get('else', '')] + [
+                rule.get(key, '') for rule in spec.get('rules') or [] for key in ('value', 'value2', 'then')]:
+            found += expressions_in(part)
+    elif isinstance(value, str):
+        found += [m.group(1) for m in EXPR.finditer(value) if not PLAIN.fullmatch(m.group(1))]
+    return found
 
 
 def number(value):
@@ -226,5 +260,8 @@ def tokens_in(value):
             for key in ('value', 'value2', 'then'):
                 found += tokens_in(rule.get(key, ''))
     elif isinstance(value, str):
-        found += [(m.group(1), m.group(2)) for m in TOKEN.finditer(value)]
+        from . import expressions
+        for m in EXPR.finditer(value):
+            plain = PLAIN.fullmatch(m.group(1))
+            found += [(plain.group(1), plain.group(2).strip())] if plain else expressions.references(m.group(1))
     return found

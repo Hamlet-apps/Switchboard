@@ -29,8 +29,10 @@ One app, `board`.
 | --- | --- |
 | `docs/PROTOCOL.md` | The contract with buildings. Town Hall and Pavilion implement it in their own `switchboard` apps; change it only together with them |
 | `models.py` | `Settings` (singleton, `Settings.load()`), `Secret`, `Folder`, `Connection`, `Workflow` (steps are JSON), `Event`, `Run`, `RunStep` |
-| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `loop` = For each, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
-| `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`: no longer offered in the builder, a Switch does that; still resolved for workflows that have one), `compare()` for conditions, `coerce()` to a param's type |
+| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `loop` = For each, `fail` = Stop with an error, the Data and Date and time steps, `http`) are described here, grouped for the picker by `CATEGORIES`; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
+| `transform.py` | The Data and Date and time steps (`nodes.TRANSFORMS`): conversions, Calculate, Change text, Set fields, reading/changing/formatting dates. Pure, so the builder works them out on sample data |
+| `expressions.py` | What goes in `{{ … }}` when it isn't one field: a small parser and evaluator (never Python `eval`), `METHODS` (`.toNumber()`, `.plus(2, "days")` …), `help_rows()` for the builder's cheat sheet |
+| `templating.py` | `{{uid.path}}` tokens (`PLAIN`; anything else in `{{ }}` is an expression), `{{secret.NAME}}`, lookup tables (`{"map": …}`: no longer offered in the builder, a Switch does that; still resolved for workflows that have one), `compare()` for conditions, `coerce()` to a param's type |
 | `schema.py` | Holding buildings to their manifest: `manifest_problems` (refuse or note, at connect and Check again), `check_params` and `literal_problem` (a step's settings against the params' types and limits, before sending), `mismatches` + `remember` (answers and events that don't match, kept on `Connection.contract_notes` and shown on the Buildings page; never fails a run) |
 | `buildings.py` | Manifest, handshake, action calls, signature check, and the HTTP step. Every outgoing request goes through `_http` |
 | `engine.py` | `start_run`, `execute` (retries on network errors and 5xx, never 4xx), `retry` (from the failed step), `receive_event`, missed events and replay, "a workflow failed" |
@@ -44,7 +46,8 @@ One app, `board`.
 
 - **Steps are a wired graph**, kept as a flat list with the trigger first. Each step has `next`,
   a map from each of its outputs to the uid it leads to (`main`; `true`/`false` for `if`; one per
-  case plus `default` for `switch`, whose cases are in `step["cases"]`; `each`/`done` for `loop`), and `x`/`y`, its place on
+  case plus `default` for `switch`, whose cases are in `step["cases"]`; `each`/`done` for `loop`; none for `fail`; plus `error` on a step with `"on_error": "branch"`,
+  see `nodes.on_error_output`), and `x`/`y`, its place on
   the canvas. An output may be unwired (the run ends there) and several may lead to one step;
   loops are refused. A run follows one path. `condition` is the Filter node (the name is kept
   because workflows store it): it stops the run. Use `nodes.ports`, `nodes.reachable`,
@@ -69,7 +72,13 @@ One app, `board`.
   `static/board/buildings/<slug>.svg`, else its initials.
 - **A step** is `{"uid", "node", "connection", "key", "params"}`; the first step is the trigger.
   A param is text with tokens, or a lookup table. A setting that is exactly one token keeps
-  the value's type.
+  the value's type, and so does one that is exactly one expression (`{{ s1.price * 2 }}`).
+  Set fields keeps its rows in `step["fields"]` (`[{"name", "value"}]`).
+- **When a step doesn't work** (Data, Date, HTTP and building steps, `nodes.CAN_FAIL_ON`): by
+  default the run fails. With `"on_error": "branch"` it goes out of `error` instead, its output
+  is `{"error": message, "branch": "error"}` and its RunStep is `ok` with `error` set.
+  `nodes.port_taken` says which output a finished step left by; use it rather than reading
+  `branch`.
 - **A run** snapshots the workflow's steps and keeps each step's output in `Run.context` by
   uid. `Run.dedupe` + the step's uid make the `Idempotency-Key`. A retry is the same run executed
   again: steps that already have a result are skipped and an If or Switch keeps the output it

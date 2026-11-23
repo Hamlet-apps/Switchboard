@@ -18,7 +18,14 @@
   var activeSlot = null;     // the setting that field clicks go into
   var savedRange = null;
   var view = { x: 0, y: 0, zoom: 1 };
-  var TOKEN = /\{\{\s*([A-Za-z0-9_]+)\.([^{}]+?)\s*\}\}/g;
+  // {{uid.path}} is a field (a chip); anything else between {{ and }} is an expression, which
+  // the server works out (expressions.py). Same rules as templating.py.
+  var PATH = '([A-Za-z0-9_]+)\\.((?:(?!\\s(?:-|and|or|not)\\s)[^{}()+*/%<>=!?:,"\'\\[\\]|&])+?)';
+  var TOKEN = new RegExp('\\{\\{\\s*' + PATH + '\\s*\\}\\}', 'g');
+  var PLAIN = new RegExp('^\\s*' + PATH + '\\s*$');
+  var EXPR = /\{\{([^{}]+?)\}\}/g;
+  // A field inside an expression: a step's uid, then .name, .0 or ["any name"] (not a method).
+  var REF = /([A-Za-z0-9_]+)((?:\.(?:[A-Za-z_][A-Za-z0-9_]*|\d+)(?![A-Za-z0-9_]*\s*\()|\["(?:[^"\\]|\\.)*"\])+)/g;
 
   var $ = function (id) { return document.getElementById(id); };
   var canvas = $('canvas'), flow = $('flow'), pickerEl = $('picker'), veil = $('veil');
@@ -65,8 +72,9 @@
   function touch() { dirty = true; renderHead(); }
 
   // ---------- definitions and sample data ----------
-  var BUILTIN = { manual: 1, schedule: 1, webhook: 1, failure: 1, condition: 1, 'if': 1, 'switch': 1, loop: 1, http: 1 };
-  
+  var BUILTIN = {};
+  (data.builtins || []).forEach(function (node) { BUILTIN[node] = 1; });
+
   function defOf(step) {
     var id = BUILTIN[step.node] ? step.node : step.node + ':' + step.connection + ':' + step.key;
     return data.defs[id] || data.missing[step.uid] || {
@@ -83,9 +91,19 @@
     if (step.node === 'if') return ['true', 'false'];
     if (step.node === 'loop') return ['each', 'done'];
     if (step.node === 'switch') return (step.cases || []).map(function (c) { return c.id; }).concat(['default']);
-    return ['main'];
+    if (step.node === 'fail') return [];
+    return errorOutput(step) ? ['main', 'error'] : ['main'];
+  }
+  // Whether a step goes out of an Error output when it doesn't work, instead of failing the run.
+  function errorOutput(step) { return step.on_error === 'branch' && !!defOf(step).can_fail_on; }
+  // The output a run left a step by, given what the step gave.
+  function portTaken(step, output) {
+    if (step.node === 'loop') return 'done';
+    if (step.node === 'if' || step.node === 'switch') return output && output.branch;
+    return errorOutput(step) && output && output.branch === 'error' ? 'error' : 'main';
   }
   function portLabel(step, port) {
+    if (port === 'error' && errorOutput(step)) return 'Error';
     if (step.node === 'if') return port === 'true' ? 'True' : 'False';
     if (step.node === 'loop') return port === 'each' ? 'Each item' : 'When done';
     if (step.node !== 'switch') return '';
@@ -203,7 +221,11 @@
     var sample = samples[step.uid];
     if (sample && typeof sample === 'object' && Object.keys(sample).length) return { real: true, fields: flatten(sample) };
     if (step.node === 'loop') return { real: false, fields: loopFields(step) };
-    return { real: false, fields: defOf(step).out.map(function (f) { return [f.key, f.example]; }) };
+    var fields = step.node === 'set'
+      ? (step.fields || []).filter(function (f) { return f.name; }).map(function (f) { return [f.name, undefined]; })
+      : defOf(step).out.map(function (f) { return [f.key, f.example]; });
+    if (errorOutput(step)) fields = fields.concat([['error', 'What went wrong, for the steps on the Error output']]);
+    return { real: false, fields: fields };
   }
   // Before a For each has been tested: what one item holds, from the list it was given (the
   // building's manifest says what's in each item).
@@ -225,9 +247,37 @@
     if (Array.isArray(value)) return ['list of ' + value.length + (value.length === 1 ? ' item' : ' items'), 'v-null'];
     return [JSON.stringify(value), 'v-null'];
   }
+  // The fields an expression reads: [[uid, key, start, end]], only for steps that exist.
+  function refsIn(inner) {
+    var out = [], m; REF.lastIndex = 0;
+    while ((m = REF.exec(inner))) {
+      var before = inner.charAt(m.index - 1);
+      if (/[A-Za-z0-9_."'\]]/.test(before) || (m[1] !== 'secret' && !stepByUid(m[1]))) { REF.lastIndex = m.index + m[1].length; continue; }
+      var keys = [], part, parts = /\.([A-Za-z0-9_]+)|\["((?:[^"\\]|\\.)*)"\]/g;
+      while ((part = parts.exec(m[2]))) keys.push(part[1] !== undefined ? part[1] : JSON.parse('"' + part[2] + '"'));
+      out.push([m[1], keys.join('.'), m.index, m.index + m[0].length]);
+    }
+    return out;
+  }
+  // How a field is written inside an expression: s1.person.name, or s1["first name"].
+  function bareRef(src, key) {
+    return src + key.split('.').map(function (k) { return /^([A-Za-z_][A-Za-z0-9_]*|\d+)$/.test(k) ? '.' + k : '[' + JSON.stringify(k) + ']'; }).join('');
+  }
+  function hasExpression(text) {
+    var m; EXPR.lastIndex = 0;
+    while ((m = EXPR.exec(String(text || '')))) if (!PLAIN.test(m[1])) return true;
+    return false;
+  }
   function tokensIn(value) {
     var found = [];
-    var scan = function (text) { String(text || '').replace(TOKEN, function (_, src, key) { found.push([src, key]); return ''; }); };
+    var scan = function (text) {
+      String(text || '').replace(EXPR, function (_, inner) {
+        var plain = inner.match(PLAIN);
+        if (plain) found.push([plain[1], plain[2].trim()]);
+        else refsIn(inner).forEach(function (r) { found.push([r[0], r[1]]); });
+        return '';
+      });
+    };
     if (value && typeof value === 'object' && value.map) {
       scan(value.map.on); scan(value.map['else']);
       (value.map.rules || []).forEach(function (r) { scan(r.value); scan(r.value2); scan(r.then); });
@@ -394,7 +444,7 @@
         var label = portLabel(step, port), target = (step.next || {})[port];
         var out = h('div', { class: 'out' + (target ? ' wired' : ''), style: 'left: ' + (100 * (i + 1) / (all.length + 1)) + '%' },
           h('span', { class: 'port', 'data-port': port, title: 'Drag to another step to connect' }),
-          label ? h('span', { class: 'port-label' + (port === 'false' || port === 'default' ? ' quiet' : ''), text: label, title: label,
+          label ? h('span', { class: 'port-label' + (port === 'false' || port === 'default' ? ' quiet' : '') + (port === 'error' ? ' err' : ''), text: label, title: label,
             style: 'max-width: ' + Math.floor(W / (all.length + 1) - 6) + 'px' }) : null);
         if (!target) {
           out.appendChild(h('button', { type: 'button', class: 'plus', 'aria-label': 'Add a step after ' + def.title + (label ? ' (' + label + ')' : ''),
@@ -430,7 +480,7 @@
         var x1 = portX(step, port), y1 = bottom + 7, x2 = target.x + W / 2, y2 = target.y - 7;
         var from = results[step.uid], to = results[target.uid];
         var went = from && from.status === 'ok' && to && to.status && to.status !== 'running' &&
-          (all.length === 1 || step.node === 'loop' || (from.output && from.output.branch === port));
+          (all.length === 1 || step.node === 'loop' || portTaken(step, from.output) === port);
         wires.appendChild(svg('path', { d: curve(x1, y1, x2, y2), class: 'wire-line' + (went ? ' went' : '') }));
         // With these control points the curve's midpoint is simply halfway. Labelled outputs
         // keep their label clear, so their buttons sit a little lower.
@@ -461,6 +511,24 @@
     if (step.node === 'switch') return 'Sends the run out of the first case that matches.';
     if (step.node === 'loop') return 'Runs "Each item" once for every item in the list, then carries on from "When done".';
     if (step.node === 'condition') return 'Stops the workflow here unless the condition is true.';
+    var p = step.params || {}, chosen = function (key) {
+      var param = def.params.filter(function (x) { return x.key === key; })[0];
+      var value = param ? paramValue(step, param) : '';
+      var choice = param && (param.choices || []).filter(function (c) { return String(c.value) === String(value); })[0];
+      return choice ? choice.label : '';
+    };
+    if (step.node === 'date_change') {
+      var n = p.amount || '1', unit = chosen('unit').toLowerCase();
+      if (String(n) === '1') unit = unit.replace(/s$/, '');
+      return (p.direction === 'subtract' ? 'Takes away ' : 'Adds ') + n + ' ' + unit + '.';
+    }
+    if (step.node === 'date_format') return 'Writes it like ' + chosen('format') + '.';
+    if (step.node === 'date_between') return 'Counts the ' + chosen('unit').toLowerCase() + ' in between.';
+    if (step.node === 'set') {
+      var names = (step.fields || []).filter(function (f) { return f.name; }).map(function (f) { return f.name; });
+      return names.length ? 'Sets ' + names.slice(0, 3).join(', ') + (names.length > 3 ? ' and ' + (names.length - 3) + ' more' : '') + '.' : def.desc;
+    }
+    if (step.node === 'fail') return p.message ? 'Stops the run: ' + String(p.message).replace(TOKEN, '…') : def.desc;
     if (step.node === 'schedule') {
       var p = step.params || {}, at = p.time || '08:00', days = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
       if (p.repeat === 'hour') return 'Starts every hour at :' + at.split(':')[1] + '.';
@@ -577,6 +645,7 @@
     (def.params || []).forEach(function (p) { if (p['default'] !== undefined) params[p.key] = String(p['default']); });
     var step = { uid: uid(), node: def.node, connection: def.connection, key: def.key || '', params: params, next: {}, x: 0, y: 0 };
     if (def.node === 'switch') step.cases = [newCase()];
+    if (def.node === 'set') step.fields = [{ name: '', value: '' }];
     var at = picker.at, from = stepByUid(at.from), onto = stepByUid(at.to);
     if (picker.mode === 'trigger') {
       var old = wf.steps[0];
@@ -596,7 +665,8 @@
         step.x = onto.x; step.y = onto.y;
         var push = 230 + (ports(step).length > 1 ? 40 : 0);
         downstream(onto.uid).forEach(function (s) { s.y += push; });
-        step.next[step.node === 'loop' ? 'done' : ports(step)[0]] = onto.uid;   // what followed comes after the loop, not inside it
+        var carryOn = step.node === 'loop' ? 'done' : ports(step)[0];   // what followed comes after the loop, not inside it
+        if (carryOn) step.next[carryOn] = onto.uid;
         from.next[at.port] = step.uid;
       } else if (from) {
         var all = ports(from), i = all.indexOf(at.port);
@@ -615,7 +685,7 @@
     var side = data.catalog[trig ? 'triggers' : 'steps'];
     pickerEl.hidden = false; pickerEl.textContent = '';
     var list = h('div', { class: 'picker-list' });
-    var search = h('input', { type: 'search', placeholder: trig ? 'Search triggers and events' : 'Search actions',
+    var search = h('input', { type: 'search', placeholder: trig ? 'Search triggers and events' : 'Search steps and actions',
       'aria-label': trig ? 'Search triggers' : 'Search actions', value: picker.query,
       oninput: function () { picker.query = search.value; fill(); } });
     pickerEl.appendChild(h('div', { class: 'picker-head' },
@@ -639,8 +709,28 @@
         hits.forEach(function (d) { list.appendChild(direct(d)); });
         return;
       }
-      list.appendChild(h('h3', { class: 'eyebrow', text: trig ? 'Basics' : 'Logic and web' }));
-      side.basics.forEach(function (d) { list.appendChild(direct(d)); });
+      if (trig) {
+        list.appendChild(h('h3', { class: 'eyebrow', text: 'Basics' }));
+        side.basics.forEach(function (d) { list.appendChild(direct(d)); });
+      } else {
+        list.appendChild(h('h3', { class: 'eyebrow', text: 'Built in' }));
+        (side.categories || []).forEach(function (cat) {
+          var key = 'cat:' + cat.name, open = picker.open === key;
+          var members = side.basics.filter(function (d) { return d.group === cat.name; });
+          var group = h('div', { class: 'pick-group' + (open ? ' open' : '') },
+            h('button', { type: 'button', class: 'pick', 'aria-expanded': open ? 'true' : 'false',
+              onclick: function () { picker.open = open ? null : key; fill(); } }, tile({ icon: cat.icon }),
+              h('span', null, h('b', { text: cat.name }), h('small', { text: members.map(function (d) { return d.title; }).join(', ') })),
+              icon(open ? 'expand_less' : 'expand_more')));
+          if (open) {
+            group.appendChild(h('div', { class: 'pick-events described' }, members.map(function (d) {
+              return h('button', { type: 'button', onclick: function () { pick(d); } }, icon(d.tile.icon),
+                h('span', null, h('b', { text: d.title }), h('small', { text: d.desc })));
+            })));
+          }
+          list.appendChild(group);
+        });
+      }
       list.appendChild(h('h3', { class: 'eyebrow', text: 'Hamlet buildings' }));
       side.buildings.slice().sort(function (a, b) { return (b.items.length ? 1 : 0) - (a.items.length ? 1 : 0); }).forEach(function (b) {
         var open = picker.open === b.connection;
@@ -681,7 +771,7 @@
 
 
   function tokenChip(src, key) {
-    var chip = h('span', { class: 'token', contenteditable: 'false', 'data-token': '{{' + src + '.' + key + '}}' });
+    var chip = h('span', { class: 'token', contenteditable: 'false', 'data-token': '{{' + src + '.' + key + '}}', 'data-src': src, 'data-key': key });
     if (src === 'secret') { chip.classList.add('secret'); chip.appendChild(icon('key')); chip.appendChild(document.createTextNode(key)); return chip; }
     var from = stepByUid(src);
     if (!from) { chip.classList.add('lost'); chip.appendChild(icon('link_off')); chip.title = 'The step this came from was removed'; }
@@ -691,13 +781,22 @@
   }
   function fillSlot(slot, text) {
     slot.textContent = '';
-    var last = 0, match; TOKEN.lastIndex = 0;
-    while ((match = TOKEN.exec(text))) {
-      if (match.index > last) slot.appendChild(document.createTextNode(text.slice(last, match.index)));
-      slot.appendChild(tokenChip(match[1], match[2]));
-      last = TOKEN.lastIndex;
+    var plainText = function (t) { if (t) slot.appendChild(document.createTextNode(t)); };
+    var last = 0, match; EXPR.lastIndex = 0;
+    while ((match = EXPR.exec(text))) {
+      plainText(text.slice(last, match.index));
+      var plain = match[1].match(PLAIN);
+      if (plain) slot.appendChild(tokenChip(plain[1], plain[2].trim()));
+      else {
+        // An expression stays as text you can edit, with the fields in it shown as chips.
+        var inner = match[1], at = 0;
+        plainText('{{');
+        refsIn(inner).forEach(function (r) { plainText(inner.slice(at, r[2])); slot.appendChild(tokenChip(r[0], r[1])); at = r[3]; });
+        plainText(inner.slice(at) + '}}');
+      }
+      last = EXPR.lastIndex;
     }
-    if (last < text.length) slot.appendChild(document.createTextNode(text.slice(last)));
+    plainText(text.slice(last));
   }
   function readSlot(slot) {
     var out = '';
@@ -705,7 +804,11 @@
       Array.prototype.forEach.call(node.childNodes, function (child) {
         if (child.nodeType === 3) out += child.nodeValue;
         else if (child.nodeType === 1) {
-          if (child.hasAttribute('data-token')) out += child.getAttribute('data-token');
+          if (child.hasAttribute('data-token')) {
+            // Inside an open {{ a field is written bare, so it becomes part of the expression.
+            out += out.lastIndexOf('{{') > out.lastIndexOf('}}') ? bareRef(child.getAttribute('data-src'), child.getAttribute('data-key'))
+              : child.getAttribute('data-token');
+          }
           else if (child.tagName === 'BR') out += '\n';
           else { if (/^(DIV|P)$/.test(child.tagName) && out && out.slice(-1) !== '\n') out += '\n'; walk(child); }
         }
@@ -720,8 +823,36 @@
       'data-placeholder': opts.placeholder || ''
     });
     fillSlot(slot, String(text == null ? '' : text));
-    var commit = function () { opts.onchange(readSlot(slot)); touch(); };
-    slot.addEventListener('input', commit);
+    var preview = h('div', { class: 'expr-preview', role: 'status', hidden: true }), timer = null;
+    slot.preview = preview;
+    var showPreview = function () {
+      var value = readSlot(slot), uid = editing;
+      clearTimeout(timer);
+      if (!hasExpression(value) || !uid) { preview.hidden = true; return; }
+      timer = setTimeout(function () {
+        post(data.urls.preview, { steps: wf.steps, uid: uid, value: value }).then(function (answer) {
+          if (!document.body.contains(slot) || readSlot(slot) !== value) return;
+          if (!preview.parentNode) slot.parentNode.insertBefore(preview, slot.nextSibling);
+          preview.hidden = false; preview.textContent = '';
+          preview.className = 'expr-preview' + (answer.ok ? '' : ' bad');
+          preview.appendChild(icon(answer.ok ? 'function' : 'error'));
+          preview.appendChild(h('span', { text: answer.ok ? (answer.shown === '' ? 'Comes to nothing (empty)' : 'With the sample data: ' + answer.shown) : (answer.error || 'Switchboard couldn’t work this out.') }));
+        });
+      }, 350);
+    };
+    var commit = function () { opts.onchange(readSlot(slot)); touch(); showPreview(); };
+    slot.addEventListener('input', function (event) {
+      // Typing {{ adds the }} and leaves the cursor in between, ready for an expression.
+      var sel = window.getSelection(), node = sel.anchorNode, at = sel.anchorOffset;
+      if (event.data === '{' && node && node.nodeType === 3 && at >= 2 && node.nodeValue.slice(at - 2, at) === '{{' &&
+          node.nodeValue.slice(at - 3, at - 2) !== '{' && node.nodeValue.slice(at, at + 2) !== '}}') {
+        node.insertData(at, '  }}');
+        var range = document.createRange(); range.setStart(node, at + 1); range.collapse(true);
+        sel.removeAllRanges(); sel.addRange(range);
+      }
+      commit();
+    });
+    setTimeout(function () { if (document.body.contains(slot)) showPreview(); }, 0);
     slot.addEventListener('focus', function () { activeSlot = slot; });
     slot.addEventListener('blur', function () {
       var sel = window.getSelection();
@@ -846,18 +977,23 @@
         'Give this one to the other service. Each call to it starts the workflow, while the workflow is on. Anyone with these addresses can call them, so keep them private.'));
     }
     var shown = def.params.filter(function (p) { return visible(step, def, p); });
-    if (!shown.length && step.node !== 'webhook') {
+    if (!shown.length && step.node !== 'webhook' && step.node !== 'set') {
       params.appendChild(h('p', { class: 'hint', style: 'font-size: 14px', text: isTrigger
         ? 'Nothing to set up here. Press Test to see what this trigger sends to the next step.'
         : 'Nothing to set up here. Press Test to see what this step sends to the next one.' }));
     }
     shown.forEach(function (p) { params.appendChild(paramControl(step, def, p, index)); });
     if (step.node === 'switch') params.appendChild(casesControl(step));
+    if (step.node === 'set') params.appendChild(fieldsControl(step, index));
     if (step.node === 'if') {
       params.appendChild(h('span', { class: 'help', text: 'On the canvas, wire the True output and the False output to what should happen each way.' }));
     }
-    if (step.node === 'action' || step.node === 'http') {
-      params.appendChild(h('span', { class: 'help', text: 'If this step fails with a network error or a server error it is tried 3 times, then the run stops and is marked failed. You can retry it from Runs.' }));
+    if (def.can_fail_on) params.appendChild(onErrorControl(step, def));
+    if (index > 0 && (shown.some(function (p) { return p.type !== 'choice' && p.type !== 'bool' && p.type !== 'time'; }) || step.node === 'set')) {
+      params.appendChild(h('details', { class: 'expr-help' },
+        h('summary', null, icon('function'), 'Work something out with {{ }}'),
+        h('p', { text: 'Type {{ in a setting to write an expression, and drop fields into it. For example, {{ price * 2 }} with the price field dropped in. The result shows under the setting, worked out on the sample data.' }),
+        h('dl', null, (data.expressionHelp || []).map(function (row) { return [h('dt', { text: row[0] }), h('dd', { text: row[1] })]; }))));
     }
     mid.appendChild(params);
 
@@ -885,6 +1021,50 @@
         h('button', { type: 'button', class: 'x', 'aria-label': 'Close', onclick: closeEditor }, icon('close'))),
       listenBar,
       h('div', { class: 'panes' }, inPane, mid, out)));
+  }
+
+  // What happens when the step doesn't work: the run stops (and can be retried from Runs), or
+  // it carries on from an Error output that the next steps can be wired to.
+  function onErrorControl(step, def) {
+    var branch = step.on_error === 'branch', calls = step.node === 'action' || step.node === 'http';
+    var select = h('select', { 'aria-label': 'If this step doesn’t work', onchange: function () {
+      if (select.value === 'branch') step.on_error = 'branch';
+      else { delete step.on_error; if (step.next) delete step.next.error; }
+      touch(); renderEditor(); renderFlow();
+    } },
+      h('option', { value: 'stop', text: 'Stop the workflow', selected: !branch }),
+      h('option', { value: 'branch', text: 'Carry on from an Error output', selected: branch }));
+    var retries = calls ? 'A network or server error is tried 3 times first. ' : '';
+    return h('div', { class: 'param on-error' },
+      h('div', { class: 'param-label' }, h('span', { class: 'name', text: 'If this step doesn’t work' })), select,
+      h('span', { class: 'help', text: branch
+        ? retries + 'Then the run goes out of the Error output on the canvas instead of failing. Wire it to what should happen, like telling someone. The steps there can use the error field.'
+        : retries + 'Then the run stops and is marked failed' + (calls ? '. You can retry it from Runs.' : '.') }));
+  }
+
+  // Set fields: a name for each new field and what goes in it.
+  function fieldsControl(step, index) {
+    var rerender = function () { touch(); renderEditor(); renderFlow(); };
+    var fields = step.fields = step.fields && step.fields.length ? step.fields : [{ name: '', value: '' }];
+    var box = h('div', { class: 'table fields' });
+    fields.forEach(function (field, i) {
+      var name = h('input', { type: 'text', class: 'name', value: field.name || '', 'aria-label': 'Name of field ' + (i + 1),
+        placeholder: 'full_name', maxlength: '80', spellcheck: 'false',
+        oninput: function () { field.name = name.value.trim(); touch(); }, onchange: function () { renderFlow(); } });
+      box.appendChild(h('div', { class: 'rule' }, name, h('span', { class: 'eq', 'aria-hidden': 'true', text: '=' }),
+        h('div', { class: 'cell' }, makeSlot(field.value || '', { label: 'Value of field ' + (i + 1), placeholder: index > 0 ? 'Type, or drop a field here' : 'Type a value',
+          onchange: function (text) { field.value = text; } })),
+        h('button', { type: 'button', class: 'x', 'aria-label': 'Remove field ' + (i + 1), disabled: fields.length < 2, onclick: function () {
+          fields.splice(fields.indexOf(field), 1); rerender();
+        } }, icon('close'))));
+    });
+    box.appendChild(h('div', { class: 'table-foot rule' },
+      h('button', { type: 'button', class: 'btn small', disabled: fields.length >= 50, onclick: function () {
+        fields.push({ name: '', value: '' }); rerender();
+      } }, icon('add'), 'Add a field'),
+      h('span', { class: 'grow' }),
+      h('span', { class: 'help', text: 'A field that is just one dropped-in field keeps its type, so a number stays a number. A name like person.name makes a field inside another.' })));
+    return h('div', { class: 'param' }, h('div', { class: 'param-label' }, h('span', { class: 'name', text: 'Fields' })), box);
   }
 
   // A Switch's cases: each is a comparison with the field above, and gets its own branch.
@@ -1020,6 +1200,12 @@
         def.missing ? null : h('button', { type: 'button', class: 'btn', onclick: function () { testStep(step); } }, 'Test this step')));
       return;
     }
+    if (result && result.status === 'ok' && portTaken(step, result.output) === 'error') {
+      head.appendChild(h('span', { class: 'pill bad' }, icon('error', 'fill'), "Didn't work"));
+      out.appendChild(h('div', { class: 'out-err', text: result.output.error || result.error }));
+      out.appendChild(h('div', { class: 'out-tip' }, icon('lightbulb'), 'In a real run the workflow carries on from the Error output, and those steps get the error field.'));
+      return;
+    }
     if (result && result.took) head.appendChild(h('span', { class: 'pill' }, icon('call_split'), 'Took ' + result.took));
     else if (result && result.stopped) head.appendChild(h('span', { class: 'pill stop' }, icon('do_not_disturb_on', 'fill'), "Check didn't pass"));
     else if (result) head.appendChild(h('span', { class: 'pill' }, icon('check_circle', 'fill'), 'Worked' + (result.ms != null ? ' · ' + result.ms + ' ms' : '')));
@@ -1108,8 +1294,8 @@
     renderEditor(); renderFlow();
     post(data.urls.test_step, { steps: wf.steps, uid: step.uid }).then(function (answer) {
       if (answer.ok) {
-        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped, took: answer.took, note: answer.note };
-        samples[step.uid] = answer.output;
+        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped, took: answer.took, note: answer.note, error: answer.error };
+        if (answer.took !== 'Error') samples[step.uid] = answer.output;
       } else results[step.uid] = { status: 'failed', error: answer.error || 'This step failed.' };
       if (editing === step.uid) renderEditor();
       renderFlow();
@@ -1120,7 +1306,7 @@
     var first = step === wf.steps[0];
     if (first && wf.steps.length > 1 && !window.confirm('Remove the trigger? The other steps stay, but the workflow can’t run until you add a new one.')) return;
     // Whatever led into this step now leads to what came after it, so the line stays whole.
-    var onward = step.node === 'loop' ? (step.next || {}).done : targets(step)[0];
+    var onward = step.node === 'loop' ? (step.next || {}).done : (step.next || {}).main || targets(step)[0];
     wf.steps.forEach(function (s) {
       ports(s).forEach(function (p) {
         if ((s.next || {})[p] !== step.uid) return;

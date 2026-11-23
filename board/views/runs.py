@@ -47,6 +47,8 @@ def _detail(run):
             note = f'{definition["kind"]} · {took(result.duration_ms)}'
             if step.get('node') in nodes.BRANCHING:
                 note = f'Went out of {result.note}'
+            elif result.error:          # it didn't work, and was set to carry on from its Error output
+                note = result.note
             if result.tries > 1:
                 note += f' · took {result.tries} tries'
         depth = result.iteration.count('.') + 1 if result.iteration else 0
@@ -62,7 +64,7 @@ def _detail(run):
         pass        # with a loop in play, what "would have come next" is no longer one clear line
     elif last and last[0]:
         if last[1].status == RunStep.OK:
-            port = (last[1].output or {}).get('branch') if last[0].get('node') in nodes.BRANCHING else 'main'
+            port = nodes.port_taken(last[0], last[1].output)
             step = by_uid.get((last[0].get('next') or {}).get(port))
         elif last[0].get('node') not in nodes.BRANCHING:
             step = by_uid.get((last[0].get('next') or {}).get('main'))

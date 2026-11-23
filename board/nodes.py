@@ -8,8 +8,8 @@ A definition (also what the builder's JavaScript gets):
     {"id", "node", "connection", "key", "trigger", "title", "desc", "kind",
      "tile": {"icon"} or {"code", "bg", "fg"}, "params": [...], "out": [{"key", "example"}]}
 """
-from . import buildings
-from .templating import MAP_OPS, OPS, UNARY, flatten, is_empty, unflatten
+from . import buildings, transform
+from .templating import MAP_OPS, OPS, UNARY, expressions_in, flatten, is_empty, unflatten
 
 TRIGGERS = ('manual', 'schedule', 'webhook', 'failure', 'event')
 
@@ -19,6 +19,13 @@ WEEKDAYS = [('mon', 'Monday'), ('tue', 'Tuesday'), ('wed', 'Wednesday'), ('thu',
 
 def _choices(pairs):
     return [{'value': value, 'label': label} for value, label in pairs]
+
+
+VALUE = {'key': 'value', 'label': 'Value', 'type': 'any', 'required': True,
+         'placeholder': 'Drop a field here'}
+DATE = {'key': 'date', 'label': 'Date', 'type': 'any',
+        'placeholder': 'Drop a date field here, or leave it empty for now',
+        'help': "Leave it empty to use the moment the step runs. Dates without a time zone are in your organization's."}
 
 
 BUILTIN = {
@@ -110,11 +117,138 @@ BUILTIN = {
         ],
         'out': [('status', 200), ('ok', True), ('body', '')],
     },
+    'fail': {
+        'icon': 'report', 'kind': 'Logic', 'title': 'Stop with an error',
+        'desc': 'Stops the run and marks it failed with your message, so "A workflow failed" workflows hear about it.',
+        'params': [
+            {'key': 'message', 'label': 'Error message', 'type': 'string', 'required': True,
+             'placeholder': 'Maria isn\'t in Pavilion yet',
+             'help': 'Shown in Runs, and sent on to any "A workflow failed" workflow. You can drop fields into it.'},
+        ],
+        'out': [],
+    },
+    # --- Data
+    'set': {
+        'icon': 'edit_note', 'kind': 'Data', 'title': 'Set fields',
+        'desc': 'Makes new fields from what earlier steps gave, like a full name from a first and last name.',
+        'params': [],
+        'out': [],
+    },
+    'to_number': {
+        'icon': 'pin', 'kind': 'Data', 'title': 'Convert to a number',
+        'desc': 'Turns text like "12.50" or "$1,200" into a number you can compare and calculate with.',
+        'params': [VALUE],
+        'out': [('value', 12.5)],
+    },
+    'to_integer': {
+        'icon': 'counter_1', 'kind': 'Data', 'title': 'Convert to a whole number',
+        'desc': 'Turns text or a number into a whole number, rounding it the way you choose.',
+        'params': [VALUE,
+                   {'key': 'rounding', 'label': 'If it has decimals', 'type': 'choice', 'default': 'round', 'plain': True,
+                    'choices': _choices([('round', 'Round to the nearest (2.5 becomes 3)'), ('down', 'Round down (2.9 becomes 2)'),
+                                         ('up', 'Round up (2.1 becomes 3)'), ('exact', 'Treat it as an error')])}],
+        'out': [('value', 3)],
+    },
+    'to_text': {
+        'icon': 'text_fields', 'kind': 'Data', 'title': 'Convert to text',
+        'desc': 'Turns a number, yes/no or a list into text, with the number of decimals you want.',
+        'params': [VALUE,
+                   {'key': 'decimals', 'label': 'Decimal places', 'type': 'int', 'min': 0, 'max': 10,
+                    'help': 'For numbers: 2 turns 12.5 into "12.50". Leave it empty to keep the number as it is.'},
+                   {'key': 'group', 'label': 'Group thousands with commas (1,200)', 'type': 'bool', 'default': 'false',
+                    'plain': True}],
+        'out': [('value', '12.50')],
+    },
+    'to_bool': {
+        'icon': 'toggle_on', 'kind': 'Data', 'title': 'Convert to yes or no',
+        'desc': 'Turns yes/no, true/false, on/off or 1/0 into a yes-or-no value.',
+        'params': [VALUE],
+        'out': [('value', True)],
+    },
+    'calculate': {
+        'icon': 'calculate', 'kind': 'Data', 'title': 'Calculate',
+        'desc': 'Adds, subtracts, multiplies, divides or rounds a number.',
+        'params': [
+            {**VALUE, 'label': 'Number'},
+            {'key': 'op', 'label': 'Do this', 'type': 'choice', 'default': 'add', 'plain': True,
+             'choices': _choices([('add', 'Add'), ('subtract', 'Subtract'), ('multiply', 'Multiply by'),
+                                  ('divide', 'Divide by'), ('remainder', 'Remainder after dividing by'),
+                                  ('round', 'Round it')])},
+            {'key': 'by', 'label': 'By', 'type': 'any', 'required': True,
+             'show_if': {'op': ['add', 'subtract', 'multiply', 'divide', 'remainder']}},
+            {'key': 'places', 'label': 'Decimal places', 'type': 'int', 'default': '0', 'min': 0, 'max': 10,
+             'show_if': {'op': ['round']}},
+        ],
+        'out': [('value', 15)],
+    },
+    'change_text': {
+        'icon': 'match_case', 'kind': 'Data', 'title': 'Change text',
+        'desc': 'Changes capitals, tidies spaces, replaces words or shortens text.',
+        'params': [
+            {**VALUE, 'label': 'Text'},
+            {'key': 'op', 'label': 'Do this', 'type': 'choice', 'default': 'title', 'plain': True,
+             'choices': _choices([('title', 'Capitalize Each Word'), ('upper', 'MAKE IT UPPERCASE'),
+                                  ('lower', 'make it lowercase'), ('trim', 'Remove extra spaces'),
+                                  ('replace', 'Replace some text'), ('first', 'Keep only the start')])},
+            {'key': 'find', 'label': 'Find', 'type': 'string', 'required': True, 'show_if': {'op': ['replace']}},
+            {'key': 'replace', 'label': 'Replace with', 'type': 'string', 'show_if': {'op': ['replace']},
+             'help': 'Leave it empty to take the text out. Capitals count: "Cafe" doesn\'t find "cafe".'},
+            {'key': 'length', 'label': 'How many characters', 'type': 'int', 'required': True, 'min': 0,
+             'show_if': {'op': ['first']}},
+        ],
+        'out': [('value', 'Maria Kowalski')],
+    },
+    # --- Date and time
+    'date_change': {
+        'icon': 'more_time', 'kind': 'Date and time', 'title': 'Change a date',
+        'desc': 'Adds or takes away minutes, hours, days, months or years, like a reminder 2 days before a shift.',
+        'params': [
+            DATE,
+            {'key': 'direction', 'label': 'Do this', 'type': 'choice', 'default': 'add', 'plain': True,
+             'choices': _choices([('add', 'Add'), ('subtract', 'Take away')])},
+            {'key': 'amount', 'label': 'How many', 'type': 'number', 'required': True, 'default': '1'},
+            {'key': 'unit', 'label': 'Of', 'type': 'choice', 'default': 'days', 'plain': True,
+             'choices': _choices(transform.UNITS)},
+        ],
+        'out': [('value', '2026-11-26T09:00:00-08:00')],
+    },
+    'date_format': {
+        'icon': 'event_note', 'kind': 'Date and time', 'title': 'Format a date',
+        'desc': 'Writes a date the way people read it, like "Monday, November 23, 2026", or picks out a part of it.',
+        'params': [
+            DATE,
+            {'key': 'format', 'label': 'Write it like', 'type': 'choice', 'default': 'long', 'plain': True,
+             'choices': transform.format_choices()},
+        ],
+        'out': [('value', 'Monday, November 23, 2026')],
+    },
+    'date_between': {
+        'icon': 'date_range', 'kind': 'Date and time', 'title': 'Time between dates',
+        'desc': 'Counts the whole days, hours or months from one date to another, like how long until a shift.',
+        'params': [
+            {**DATE, 'key': 'start', 'label': 'From'},
+            {**DATE, 'key': 'end', 'label': 'To'},
+            {'key': 'unit', 'label': 'Count in', 'type': 'choice', 'default': 'days', 'plain': True,
+             'choices': _choices(transform.UNITS)},
+        ],
+        'out': [('value', 3)],
+    },
 }
 
+# The picker's headings for the steps after the trigger, in order, with the steps under each.
+CATEGORIES = [
+    ('Logic', 'account_tree', ['condition', 'if', 'switch', 'loop', 'fail']),
+    ('Data', 'data_object', ['set', 'to_number', 'to_integer', 'to_text', 'to_bool', 'calculate', 'change_text']),
+    ('Date and time', 'calendar_month', ['date_change', 'date_format', 'date_between']),
+    ('Web', 'language', ['http']),
+]
 TRIGGER_BASICS = ['manual', 'schedule', 'webhook', 'failure']
-STEP_BASICS = ['condition', 'if', 'switch', 'loop', 'http']
+STEP_BASICS = [node for _, _, members in CATEGORIES for node in members]
 BRANCHING = ('if', 'switch')
+# Steps that only work values out: no side effects, so the builder may run them on sample data.
+TRANSFORMS = tuple(CATEGORIES[1][2] + CATEGORIES[2][2])
+# Steps that can carry on from an Error output instead of failing the run.
+CAN_FAIL_ON = TRANSFORMS + ('http', 'action')
 
 
 def _builtin(node):
@@ -123,6 +257,8 @@ def _builtin(node):
         'id': node, 'node': node, 'connection': None, 'key': '', 'trigger': bool(spec.get('trigger')),
         'title': spec['title'], 'desc': spec['desc'], 'kind': spec['kind'], 'tile': {'icon': spec['icon']},
         'params': spec['params'], 'out': [{'key': k, 'example': v} for k, v in spec['out']],
+        'group': next((name for name, _, members in CATEGORIES if node in members), spec['kind']),
+        'can_fail_on': node in CAN_FAIL_ON,
     }
 
 
@@ -201,6 +337,7 @@ def _action(connection, action):
         'kind': f"{connection.name} · {'Look up' if lookup else 'Action'}",
         'tile': buildings.look(connection.building, connection.name, connection),
         'params': [_param(p) for p in action.get('params') or [] if isinstance(p, dict) and p.get('key')],
+        'can_fail_on': True,
         'out': _fields(action.get('output')),
     }
 
@@ -251,6 +388,7 @@ def catalog(connections):
         },
         'steps': {
             'basics': [_builtin(n) for n in STEP_BASICS],
+            'categories': [{'name': name, 'icon': icon} for name, icon, _ in CATEGORIES],
             'buildings': [building(c, [_action(c, a) for a in c.actions()], 'action') for c in live],
         },
     }
@@ -286,6 +424,9 @@ def visible(param, values):
 #   most steps      {"main": uid}
 #   If              {"true": uid, "false": uid}
 #   Switch          {<case id>: uid, …, "default": uid}   with its cases in step["cases"]
+#   For each        {"each": uid, "done": uid}
+#   Stop with an error has none
+# A step with "on_error": "branch" also has "error", the way the run goes when it doesn't work.
 # An output can be left unconnected (the run ends there), and several outputs may lead to the
 # same step. `x`/`y` are where the step sits on the canvas. The trigger is always first.
 
@@ -297,7 +438,32 @@ def ports(step):
         return [case['id'] for case in step.get('cases') or []] + ['default']
     if step.get('node') == 'loop':
         return ['each', 'done']
-    return ['main']
+    if step.get('node') == 'fail':
+        return []
+    return ['main', 'error'] if on_error_output(step) else ['main']
+
+
+def on_error_output(step):
+    """Whether a step carries on from its Error output when it doesn't work, instead of
+    failing the run (`"on_error": "branch"`)."""
+    return step.get('on_error') == 'branch' and step.get('node') in CAN_FAIL_ON
+
+
+def error_output(message):
+    """What a step that didn't work gives the steps on its Error output."""
+    return {'error': message, 'branch': 'error'}
+
+
+def port_taken(step, output):
+    """The output a run left a finished step by."""
+    node = step.get('node')
+    if node == 'loop':
+        return 'done'
+    if node in BRANCHING:
+        return (output or {}).get('branch') if isinstance(output, dict) else None
+    if on_error_output(step) and isinstance(output, dict) and output.get('branch') == 'error':
+        return 'error'
+    return 'main'
 
 
 def new_cases():
@@ -306,6 +472,8 @@ def new_cases():
 
 def port_label(step, port):
     """What an output is called on the canvas and in the run log."""
+    if port == 'error' and on_error_output(step):
+        return 'Error'
     if step.get('node') == 'if':
         return 'True' if port == 'true' else 'False'
     if step.get('node') == 'loop':
@@ -430,6 +598,27 @@ def would_loop(steps, source, target):
     return False
 
 
+def _expression_problems(step, definition, uids):
+    """Expressions in a step's settings that can't be read, or that name a step that isn't there."""
+    from . import expressions
+    stored = list((step.get('params') or {}).values())
+    stored += [case.get(key, '') for case in step.get('cases') or [] for key in ('value', 'value2')]
+    stored += [field.get('value', '') for field in step.get('fields') or []]
+    found = []
+    for value in stored:
+        for inner in expressions_in(value):
+            try:
+                expressions.parse(inner)
+            except expressions.ExpressionError as error:
+                found.append(f'"{definition["title"]}": {{{{ {inner.strip()} }}}} can\'t be read. {str(error).rstrip(".")}.')
+                continue
+            for root, _path in expressions.references(inner):
+                if root not in uids:
+                    found.append(f'"{definition["title"]}": {{{{ {inner.strip()} }}}} uses "{root}", '
+                                 'which isn\'t a step in this workflow. Drag the field in from the left instead.')
+    return found
+
+
 def problems(steps, connections):
     """Why a workflow can't run yet, in plain words. Empty when it can.
 
@@ -439,6 +628,7 @@ def problems(steps, connections):
     if not steps:
         return ['Add a trigger first.']
     found = []
+    uids = {step['uid'] for step in steps} | {'secret'}
     first = describe(steps[0], connections)
     if not first['trigger']:
         found.append('The first step has to be a trigger.')
@@ -470,6 +660,9 @@ def problems(steps, connections):
             for case in step.get('cases') or []:
                 if is_empty(case.get('value')):
                     found.append('A Switch case has nothing to compare with.')
+        found += _expression_problems(step, definition, uids)
+        if step.get('node') == 'set' and not any(str(f.get('name') or '').strip() for f in step.get('fields') or []):
+            found.append('"Set fields" needs at least one field with a name.')
         connection = connections.get(step.get('connection'))
         if connection is not None and connection.status == connection.BROKEN:
             found.append(f'{connection.name} needs reconnecting.')

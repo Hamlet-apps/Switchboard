@@ -1,8 +1,10 @@
 """Running workflows.
 
 `start_run` records a run with the trigger's data; `execute` follows the wiring from
-the trigger (an If or Switch leaves by one of its outputs), writing a RunStep per step it does. A step that hits a network error or a 5xx is tried again after
-`settings.STEP_RETRY_WAITS`; a 4xx fails at once. A failed run can be retried from the step
+the trigger (an If or Switch leaves by one of its outputs), writing a RunStep per step it does.
+A step that hits a network error or a 5xx is tried again after `settings.STEP_RETRY_WAITS`; a
+4xx fails at once. A step set to carry on when it doesn't work (`nodes.on_error_output`) goes
+out of its Error output instead of failing the run. A failed run can be retried from the step
 that failed (`retry`): earlier steps' results are kept, and every action call carries an
 Idempotency-Key made from the run and the step, so nothing is ever done twice.
 """
@@ -15,7 +17,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from . import buildings, nodes, schema, templating
+from . import buildings, expressions, nodes, schema, templating, transform
 from .buildings import BuildingError
 from .models import Connection, Event, Run, RunStep, Secret, Settings, Workflow
 
@@ -94,6 +96,13 @@ def _headers(text):
 
 def perform(step, definition, ctx, connections, secrets, dedupe):
     """Do one non-trigger step. Returns (output, what was sent, a short note)."""
+    try:
+        return _perform(step, definition, ctx, connections, secrets, dedupe)
+    except expressions.ExpressionError as error:
+        raise BuildingError(str(error))
+
+
+def _perform(step, definition, ctx, connections, secrets, dedupe):
     if definition.get('missing'):
         raise BuildingError(definition['desc'])
     values = _settings_of(step, definition, ctx, secrets)
@@ -124,6 +133,14 @@ def perform(step, definition, ctx, connections, secrets, dedupe):
                 label = nodes.port_label(step, case['id'])
                 return {'matched': True, 'branch': case['id'], 'case': label}, values, label
         return {'matched': False, 'branch': 'default', 'case': 'Otherwise'}, values, 'Otherwise'
+    if node == 'fail':
+        raise BuildingError(templating.text(values.get('message')).strip() or 'Stopped with an error.')
+    if node in nodes.TRANSFORMS:
+        try:
+            output, note = transform.run(node, values, step, Settings.load().zone(), ctx, secrets)
+        except ValueError as error:
+            raise BuildingError(f'{error}.' if not str(error).endswith('.') else str(error))
+        return output, values, note
     if node == 'http':
         body = values.get('body')
         output = buildings.http_request(values.get('method', 'POST'), str(values.get('url', '')).strip(),
@@ -244,6 +261,7 @@ def execute(run):
                 began = time.monotonic()
                 took = lambda: int((time.monotonic() - began) * 1000)  # noqa: E731
                 dedupe = f'{run.dedupe}:{iteration}' if iteration else run.dedupe
+                went_wrong = ''
                 try:
                     output, sent, note, tries = perform_with_retries(step, definition, view, connections, secrets, dedupe)
                 except Stop as stop:
@@ -254,9 +272,13 @@ def execute(run):
                     record(step, iteration, definition, status=RunStep.STOPPED, note=str(stop), duration_ms=took())
                     raise _Halt(Run.STOPPED)
                 except BuildingError as failure:
-                    record(step, iteration, definition, status=RunStep.FAILED, error=_redact(str(failure), secrets)[:500],
-                           tries=getattr(failure, 'tries', 1), duration_ms=took())
-                    raise _Halt(Run.FAILED, str(failure), uid)
+                    went_wrong, tries = _redact(str(failure), secrets), getattr(failure, 'tries', 1)
+                    if not nodes.on_error_output(step):
+                        record(step, iteration, definition, status=RunStep.FAILED, error=went_wrong[:500],
+                               tries=tries, duration_ms=took())
+                        raise _Halt(Run.FAILED, str(failure), uid)
+                    # Set to carry on: the run goes out of the Error output, which gets the message.
+                    output, sent, note = nodes.error_output(went_wrong), None, "Didn't work, so it went out of Error"
                 except Exception as crash:  # a bug in Switchboard must not leave the run "running" forever
                     log.exception('Run %s crashed at step %s', run.pk, uid)
                     message = f'Switchboard hit an unexpected problem: {crash}'
@@ -265,7 +287,7 @@ def execute(run):
                 ctx[key] = output
                 shown = {'count': output['count']} if step.get('node') == 'loop' else output
                 record(step, iteration, definition, status=RunStep.OK, output=shown, sent=_redact(sent, secrets), note=note,
-                       tries=tries, duration_ms=took())
+                       tries=tries, duration_ms=took(), error=went_wrong[:500])
             view[uid] = output
             wires = step.get('next') or {}
             if step.get('node') == 'loop':
@@ -274,12 +296,7 @@ def execute(run):
                     view[uid] = {'item': item, 'index': number, 'count': len(items)}
                     follow(by_uid.get(wires.get('each')), f'{iteration}.{number}' if iteration else str(number), view)
                 view[uid] = {'item': items[-1] if items else None, 'index': len(items), 'count': len(items)}
-                port = 'done'
-            elif step.get('node') in nodes.BRANCHING and isinstance(output, dict):
-                port = output.get('branch')
-            else:
-                port = 'main'
-            step = by_uid.get(wires.get(port))
+            step = by_uid.get(wires.get(nodes.port_taken(step, output)))
 
     status, error, failed_uid = Run.SUCCEEDED, '', ''
     try:

@@ -14,9 +14,10 @@ Free, open source and self-hosted, like the rest of the village.
   output to another step to connect them, drag steps where you like, or press Tidy. Triggers are a
   building's event, a schedule, a private webhook URL, a button, or "a workflow failed".
   Steps look something up in a building, do something there, or send an HTTP request to
-  anything else. Three logic steps steer a run: **Filter** (only continue if a condition is
-  true), **If** (a True branch and a False branch) and **Switch** (one branch per case, plus
-  Otherwise). Each of those ways out is an output you wire to whatever should happen next,
+  anything else. Four logic steps steer a run: **Filter** (only continue if a condition is
+  true), **If** (a True branch and a False branch), **Switch** (one branch per case, plus
+  Otherwise) and **For each** (its steps run once for every item of a list, such as the
+  people a lookup found, then the workflow carries on). Each of those ways out is an output you wire to whatever should happen next,
   and two wires can lead to the same step.
 - **Fields, not code**: every step shows the data that flows into it from the steps wired
   before it. Drag a field into a setting.

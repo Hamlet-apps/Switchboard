@@ -152,6 +152,10 @@ class Workflow(models.Model):
     # The last output each step gave in a test, by uid: the sample data the editor shows.
     samples = models.JSONField(default=dict)
     hook_token = models.CharField(max_length=64, unique=True, default=new_token)
+    # While the builder listens on the webhook's test URL: until when it answers, and the call
+    # it caught (the builder picks it up and clears it). Test calls never start a run.
+    test_until = models.DateTimeField(null=True, blank=True)
+    test_call = models.JSONField(null=True, blank=True)
     next_fire_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -1,5 +1,5 @@
 {% extends 'board/base.html' %}
-{% load static %}
+{% load static board_tags %}
 {% block title %}{{ workflow.name }} · Switchboard{% endblock %}
 {% block body_class %}b-body{% endblock %}
 {% block body %}
@@ -56,4 +56,4 @@
 {{ data|json_script:"builder-data" }}
 <input type="hidden" id="csrf" value="{{ csrf_token }}">
 {% endblock %}
-{% block scripts %}<script src="{% static 'board/builder.js' %}"></script>{% endblock %}
+{% block scripts %}<script src="{% asset 'board/builder.js' %}"></script>{% endblock %}

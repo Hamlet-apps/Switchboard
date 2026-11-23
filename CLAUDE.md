@@ -68,7 +68,12 @@ One app, `board`.
 - **Events** arrive at `/hooks/building/<Connection.hook_token>`, signed with the connection's
   webhook secret. They are stored (`Event`) before anything runs; duplicates are dropped by
   (connection, event id). Events for a paused workflow show as missed calls in its builder
-  and can be replayed.
+  and can be replayed. "Test this step" on a building or webhook trigger listens: the builder
+  polls `workflow_listen` (every 2 s, up to 10 min) and what comes in becomes the trigger's
+  sample. Nothing runs. A building trigger waits for a matching `Event` newer than when it
+  started. A webhook has two URLs: production (`/hooks/w/<token>`, starts runs while on) and
+  test (`…/test`), which answers only while `Workflow.test_until` is ahead (each poll pushes it
+  30 s on) and leaves the call in `Workflow.test_call` for the next poll.
 - **The worker** is one daemon thread per web process, started on the first request. Runs are
   claimed with a conditional update, so several processes can share the queue. Tests set
   `RUN_INLINE`, which runs on the calling thread.
@@ -88,6 +93,10 @@ One app, `board`.
   Vice pink `--pink`, rose `--rose` for actions). Space Grotesk for headings, Inter for text,
   JetBrains Mono for field names, Material Symbols Rounded for icons.
 - In JS, build DOM with `h()` and `textContent`; never `innerHTML` with data.
+- Link our CSS and JS with `{% asset %}` (`board_tags`), not `{% static %}`: in development it
+  adds the file's modified time so browsers don't keep a stale copy.
+- Canvas classes are short (`.out`, `.port`, `.in`) and so are the editor's (`.pane.out`,
+  `.pane.in`): scope canvas rules under `.gnode` so they don't reach the editor.
 - Copy is for non-technical admins: say what happened and what to do, no jargon. Error
   messages from buildings are shown as they come.
 - Add a test with every change; fake buildings with `FakeWorld` in `board/tests.py`.

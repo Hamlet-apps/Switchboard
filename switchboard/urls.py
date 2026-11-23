@@ -14,6 +14,7 @@ urlpatterns = [
     path('workflows/<int:pk>/toggle/', views.workflow_toggle, name='workflow_toggle'),
     path('workflows/<int:pk>/test/', views.workflow_test, name='workflow_test'),
     path('workflows/<int:pk>/test-step/', views.workflow_test_step, name='workflow_test_step'),
+    path('workflows/<int:pk>/listen/', views.workflow_listen, name='workflow_listen'),
     path('workflows/<int:pk>/run/', views.workflow_run, name='workflow_run'),
     path('workflows/<int:pk>/replay/', views.workflow_replay, name='workflow_replay'),
     path('workflows/<int:pk>/delete/', views.workflow_delete, name='workflow_delete'),
@@ -38,5 +39,6 @@ urlpatterns = [
     # Called by other servers: fixed paths, no sign-in (signature or secret token instead).
     path('hooks/building/<str:token>', views.building_hook, name='building_hook'),
     path('hooks/w/<str:token>', views.workflow_hook, name='workflow_hook'),
+    path('hooks/w/<str:token>/test', views.workflow_hook_test, name='workflow_hook_test'),
     path('healthz', views.healthz, name='healthz'),
 ]

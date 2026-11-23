@@ -670,6 +670,21 @@ class ContractTests(Base):
             self.assertNotEqual(type_error(value, kind), '', (value, kind))
 
 
+class RunawayTests(Base):
+    def test_a_workflow_that_keeps_starting_itself_is_switched_off(self):
+        workflow = self.recipe()
+        self.world.on('POST', 'https://pv.test/switchboard/v1/actions/staff.find', (200, {'found': False}))
+        with self.settings(RUNAWAY_LIMIT=3):
+            for n in range(5):
+                self.deliver(self.th, self.level_event(event_id=f'evt_{n}'))
+        workflow.refresh_from_db()
+        self.assertFalse(workflow.enabled)
+        self.assertEqual([r.status for r in workflow.runs.order_by('id')], ['stopped'] * 3 + ['failed'])
+        self.assertIn('looks like a loop', workflow.runs.first().error)
+        self.assertEqual(engine.missed_events(workflow).count(), 1)     # the one after it was paused can be replayed
+        self.assertContains(self.client.get(reverse('runs')), 'looks like a loop')
+
+
 class HookTests(Base):
     def test_bad_signature_and_unknown_connection(self):
         self.recipe()

@@ -6,6 +6,7 @@ the trigger (an If or Switch leaves by one of its outputs), writing a RunStep pe
 that failed (`retry`): earlier steps' results are kept, and every action call carries an
 Idempotency-Key made from the run and the step, so nothing is ever done twice.
 """
+import datetime
 import hashlib
 import logging
 import time
@@ -325,11 +326,32 @@ def receive_event(connection, envelope):
                                      for wrong in schema.mismatches(trigger.get('fields'), data)])
     runs = []
     for workflow in listeners(connection, type_):
+        if _runaway(workflow, event):
+            continue
         run = start_run(workflow, data, event.summary, event=event)
         if run:
             runs.append(run)
             worker.submit(run)
     return event, runs
+
+
+def _runaway(workflow, event):
+    """Switch a workflow off when it starts far too often.
+
+    A building's actions set off events of their own (issuing a gift card sends "gift card
+    issued"), so a workflow can end up starting itself round and round. Past the limit it is
+    paused, and a failed run says why.
+    """
+    since = timezone.now() - datetime.timedelta(seconds=settings.RUNAWAY_WINDOW)
+    if workflow.runs.filter(is_test=False, created_at__gte=since).count() < settings.RUNAWAY_LIMIT:
+        return False
+    Workflow.objects.filter(pk=workflow.pk).update(enabled=False, paused_at=timezone.now(), next_fire_at=None)
+    Run.objects.create(
+        workflow=workflow, status=Run.FAILED, trigger_label=event.summary[:200], steps=[], finished_at=timezone.now(),
+        error=(f'Switched off: it started {settings.RUNAWAY_LIMIT} times in a minute, which looks like a loop. '
+               'Check that none of its steps sets off its own trigger, then switch it back on.')[:500])
+    log.warning('Workflow %s paused: %s runs in %ss', workflow.pk, settings.RUNAWAY_LIMIT, settings.RUNAWAY_WINDOW)
+    return True
 
 
 def listeners(connection, type_, enabled=True):

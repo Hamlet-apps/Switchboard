@@ -75,6 +75,7 @@ One app, `board`.
   started. A webhook has two URLs: production (`/hooks/w/<token>`, starts runs while on) and
   test (`…/test`), which answers only while `Workflow.test_until` is ahead (each poll pushes it
   30 s on) and leaves the call in `Workflow.test_call` for the next poll.
+- **Runaway guard**: buildings' actions emit events, so a workflow can trigger itself. `engine._runaway` pauses a workflow that starts `RUNAWAY_LIMIT` (120) times within `RUNAWAY_WINDOW` (60 s) and leaves a failed run saying why.
 - **The worker** is one daemon thread per web process, started on the first request. Runs are
   claimed with a conditional update, so several processes can share the queue. Tests set
   `RUN_INLINE`, which runs on the calling thread.

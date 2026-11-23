@@ -218,38 +218,62 @@ break the thing that caused the event: failures are logged, not raised.
 
 ## 5. What each building offers
 
-Names below are fixed because Switchboard's ready-made recipes use them. Buildings are free
-to add more triggers, actions and fields.
+A building's manifest is the full, current list: read `/.well-known/switchboard` on a running
+building, or `switchboard/manifest.py` in its repository. This section only gives the shape of
+each, and the few names Switchboard's ready-made recipes depend on (those must never change).
 
-### Town Hall (`town-hall`)
+Shared shapes, so workflows can mix buildings: a person is `person.id|name|email` in Town Hall
+and `staff.id|name|email` or `customer.name|email` in Pavilion; ids are strings; a lookup
+answers `found`, and one that can match several answers `count`, the first match in full and
+the rest as names joined into text (Switchboard has no loops yet).
 
-Triggers: `volunteer.level_reached` (`person.id|name|email`, `level` (1 = the lowest level,
-by `min_points` order), `level_name`, `previous_level`, `impact_points`),
-`volunteer.registered`, `shift.signed_up` (`person.*`, `shift.id`, `shift.role`,
-`shift.starts_at`, `shift.ends_at`, `event.id`, `event.title`, `event.place`),
-`shift.cancelled`, `shift.completed` (`person.*`, `shift.role`, `hours`, `points`,
-`event.title`), `event.published`, `training.completed`.
+### Town Hall (`town-hall`): 43 events, 36 actions
 
-Actions: `person.find` (lookup, by `email` → `found`, `person_id`, `name`, `email`, `level`,
-`level_name`, `impact_points`, `total_hours`), `person.get` (lookup, by `person_id`),
-`person.invite` (action: `name`, `email` → `person_id`, `created`),
-`notification.send` (action: `person_id`, `title`, `message`, optional `link`).
+- **People**: registered, level reached, profile completed, email changed, deactivated or
+  reactivated, role assigned or unassigned, points awarded, endorsement given. Find, search,
+  update, deactivate; award points; give an endorsement; assign roles; check whether someone
+  qualifies for a role.
+- **Sign-ups and shifts**: signed up, cancelled, shift filled, shift lead and area lead
+  assigned, invitations sent, accepted and declined, shift started and completed. Sign someone
+  up (with the same checks a volunteer faces), cancel, invite, start and end a shift.
+- **Events**: created, published, unpublished, rescheduled, coordinator added, feedback
+  submitted. Find, create (always unpublished), update, publish, add a shift, message the
+  event's volunteers.
+- **Training, certificates, venues**: module published and started, quiz passed, training
+  completed; certificate submitted, approved, rejected; venue note posted; lookups for each.
+- **Time-based**, each sent once: event starting in 24 hours, started, ended; shift still
+  short 48 hours ahead; shift starting soon; no-show; training expired; certificate expiring
+  and expired.
 
-### Pavilion (`pavilion`)
+Recipes use: trigger `volunteer.level_reached` (`person.email`, `person.name`, `level`),
+trigger `shift.signed_up` (`person.name`, `person.email`, `shift.starts_at`, `shift.ends_at`).
 
-Triggers: `order.placed` and `order.ready` (`order.id`, `order.number`, `order.type`,
-`order.channel`, `order.total`, `order.items` (count), `customer.name`, `customer.email`),
-`staff.clocked_in`, `staff.clocked_out` (`staff.id|name|email`, `at`, `role`, and `hours` on
-clock-out).
+### Pavilion (`pavilion`): 60 events, 33 actions
 
-Actions: `staff.find` (lookup, by `email` → `found`, `staff_id`, `name`, `email`, `roles`
-(names joined with ", "), `active`), `staff.ensure` (action: `name`, `email`, optional `role`,
-optional `invite` → `staff_id`, `created`; makes a staff account when there isn't one for
-that email), `staff_card.issue` (action: `staff_id`, `amount`, optional `label`, optional
-`replace_previous` bool → `card_id`, `amount`, `label`, `replaced`; **the label is the card
-type's name** on Pavilion's Staff cards page, so use one label for everyone rather than one
-per person), `shift.add` (action: `staff_id`, `starts_at`, `ends_at`, optional `role`,
-optional `note` → `shift_id`, `status`, `created`; a shift can't run past midnight).
+- **Orders**: placed, approved, a station done, ready, picked up, rejected, refunded, discount
+  used; deliveries assigned, picked up, delivered. Find an order, send its receipt, a day's
+  sales summary. Nothing creates, changes, charges or refunds an order.
+- **Catering and services**: requested, confirmed, changes proposed and countered, message
+  received, rejected, cancelled, deposit held, completed; service booked. Find a request and
+  send its customer a message.
+- **Gift and staff cards**: sold, issued, used, loaded, emptied; staff card issued and
+  refilled. Issue, look up, load, freeze and resend a gift card (its number is never answered,
+  only emailed to its owner); issue a staff card; create and find coupons.
+- **Menu and stock**: dish sold out and back, station paused and resumed, stock low and run
+  out, stock received, restock placed and delivered, batch cooked. Find dishes and stock, set
+  a dish's availability, pause a station, adjust stock.
+- **Cash, people and schedule**: drawer opened, closed, cash moved; customer registered; staff
+  added, clocked in and out, break started and ended; schedule published; shift offered, taken,
+  swapped; time off and availability requested and decided. Find staff and customers, add or
+  cancel a shift, request time off, see who is on now.
+- **Store**: ordering paused and resumed, store event created, a screen's dongle going offline
+  and online. Store status, pause and resume ordering, create a store event, post an
+  announcement to the screens.
+
+Recipes use: `staff.find` (`email` → `found`, `staff_id`), `staff.ensure` (`name`, `email` →
+`staff_id`), `staff_card.issue` (`staff_id`, `amount`, `label`, `replace_previous`; **the label
+is the card type's name** on Pavilion's Staff cards page, so use one label for everyone),
+`shift.add` (`staff_id`, `starts_at`, `ends_at`; a shift can't run past midnight).
 
 ## 6. Notes from the first two buildings
 
@@ -258,3 +282,8 @@ optional `note` → `shift_id`, `status`, `created`; a shift can't run past midn
 - Disconnecting on the building's side doesn't call Switchboard. Switchboard finds out from
   the `401` on its next call and shows the connection as needing to be reconnected.
 - Idempotency records also keep 4xx answers, so a repeated key gets the same refusal.
+- A building's own actions set off its events (issuing a gift card sends "gift card issued"),
+  so a workflow can start itself. Switchboard pauses a workflow that starts 120 times in a
+  minute and says why in its run log.
+- Dates without a time are text `YYYY-MM-DD` and times of day `HH:MM`: there is no type for
+  them yet.

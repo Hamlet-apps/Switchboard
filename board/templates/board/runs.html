@@ -63,6 +63,7 @@
       </div>
       <span class="pill {{ selected.run.status }}">{{ selected.label }}</span>
     </header>
+    {% if selected.run.error and not selected.steps %}<p class="err">{{ selected.run.error }}</p>{% endif %}
     <ol class="run-steps">
       {% for step in selected.steps %}
       <li class="is-{{ step.status }}">

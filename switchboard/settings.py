@@ -131,6 +131,9 @@ if PRODUCTION:
 # --- Switchboard -------------------------------------------------------------------------
 # Seconds to wait before the 2nd, 3rd… try of a step that hit a network error or a 5xx.
 STEP_RETRY_WAITS = [2, 8]
+# A workflow that starts this many times within the window is taken to be looping and is paused.
+RUNAWAY_LIMIT = 120
+RUNAWAY_WINDOW = 60
 # Seconds a building or outside URL gets to answer.
 HTTP_TIMEOUT = 15
 # Tests run workflows on the calling thread; the server hands them to the worker thread.

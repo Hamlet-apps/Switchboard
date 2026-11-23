@@ -273,7 +273,7 @@ list a workflow can loop over.
 Recipes use: trigger `volunteer.level_reached` (`person.email`, `person.name`, `level`),
 trigger `shift.signed_up` (`person.name`, `person.email`, `shift.starts_at`, `shift.ends_at`).
 
-### Pavilion (`pavilion`): 60 events, 43 actions
+### Pavilion (`pavilion`): 60 events, 44 actions
 
 - **Orders**: placed, approved, a station done, ready, picked up, rejected, refunded, discount
   used; deliveries assigned, picked up, delivered. Find an order, send its receipt, a day's

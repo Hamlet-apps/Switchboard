@@ -33,44 +33,43 @@ def _pretty(value):
 
 def _detail(run):
     """The selected run's steps along the path it took: what ran, what stopped it, and what
-    never got a turn. Branches that weren't taken are left out."""
+    was next in line but never got a turn."""
     connections = {c.id: c for c in Connection.objects.all()}
-    results = {r.uid: r for r in run.step_results.all()}
+    graph = nodes.upgrade(run.steps)
+    by_uid = {step['uid']: step for step in graph}
     waiting = run.status in (Run.QUEUED, Run.RUNNING)
-    steps = []
-
-    def add(items, depth, reached):
-        for position, step in enumerate(items):
-            result = results.get(step['uid'])
-            definition = nodes.describe(step, connections)
-            first = depth == 0 and position == 0
-            row = {'title': definition['title'], 'tile': definition['tile'], 'depth': depth, 'first': first}
-            if result is None:
-                row.update(status='waiting' if waiting else 'skipped', note='Waiting' if waiting else 'Skipped')
-                steps.append(row)
-                reached = False
-                continue    # an If or Switch that never ran took no branch, so nothing of it to show
-            note = result.note
-            if result.status == RunStep.OK and not first:
-                note = f'{definition["kind"]} · {took(result.duration_ms)}'
-                if step.get('node') in nodes.BRANCHING:
-                    note = f'Took the {result.note} branch'
-                if result.tries > 1:
-                    note += f' · took {result.tries} tries'
-            row.update(title=result.title, status=result.status, note=note, error=result.error,
-                       sent=_pretty(result.sent), output=_pretty(result.output))
-            steps.append(row)
-            if result.status != RunStep.OK:
-                reached = False
-            if step.get('node') in nodes.BRANCHING and result.status == RunStep.OK:
-                taken = (result.output or {}).get('branch')
-                chosen = next((b for b in step.get('branches') or [] if b['id'] == taken), None)
-                if chosen and chosen.get('steps'):
-                    reached = add(chosen['steps'], depth + 1, reached)
-        return reached
-
-    add(run.steps, 0, True)
-    failed = nodes.find(run.steps, run.failed_uid) if run.failed_uid else None
+    steps, last, seen = [], None, set()
+    for position, result in enumerate(run.step_results.all()):
+        step = by_uid.get(result.uid, {})
+        definition = nodes.describe(step, connections) if step else {'kind': '', 'tile': {'icon': 'help'}}
+        note = result.note
+        if result.status == RunStep.OK and position > 0:
+            note = f'{definition["kind"]} · {took(result.duration_ms)}'
+            if step.get('node') in nodes.BRANCHING:
+                note = f'Went out of {result.note}'
+            if result.tries > 1:
+                note += f' · took {result.tries} tries'
+        steps.append({'title': result.title, 'tile': definition['tile'], 'first': position == 0, 'status': result.status,
+                      'note': note, 'error': result.error, 'sent': _pretty(result.sent), 'output': _pretty(result.output)})
+        last, seen = (step, result), seen | {result.uid}
+    # What would have come next: follow the wiring on from where the run stopped, as far as
+    # it is certain (an If or Switch that never ran could have gone any way).
+    step = None
+    if last and last[0]:
+        if last[1].status == RunStep.OK:
+            port = (last[1].output or {}).get('branch') if last[0].get('node') in nodes.BRANCHING else 'main'
+            step = by_uid.get((last[0].get('next') or {}).get(port))
+        elif last[0].get('node') not in nodes.BRANCHING:
+            step = by_uid.get((last[0].get('next') or {}).get('main'))
+    elif graph and not steps:
+        step = graph[0]
+    while step is not None and step['uid'] not in seen and (waiting or run.status != Run.SUCCEEDED):
+        seen.add(step['uid'])
+        definition = nodes.describe(step, connections)
+        steps.append({'title': definition['title'], 'tile': definition['tile'], 'first': False,
+                      'status': 'waiting' if waiting else 'skipped', 'note': 'Waiting' if waiting else 'Skipped'})
+        step = None if step.get('node') in nodes.BRANCHING else by_uid.get((step.get('next') or {}).get('main'))
+    failed = by_uid.get(run.failed_uid) if run.failed_uid else None
     return {'run': run, 'steps': steps, 'icon': LOOK[run.status][0], 'label': LOOK[run.status][1],
             'took': took(run.duration_ms),
             'retry_from': nodes.describe(failed, connections)['title'] if failed else ''}

@@ -4,6 +4,7 @@ import secrets
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -28,7 +29,7 @@ def buildings_page(request):
     cards = []
     for connection in Connection.objects.exclude(status=Connection.PENDING):
         cards.append({
-            'connection': connection, 'tile': buildings.look(connection.building, connection.name),
+            'connection': connection, 'tile': buildings.look(connection.building, connection.name, connection),
             'triggers': connection.triggers(), 'actions': connection.actions(),
             'workflows': _uses(connection, workflows),
             'events_week': Event.objects.filter(connection=connection, received_at__gte=week).count(),
@@ -51,6 +52,7 @@ def building_connect(request):
         return redirect(f"{reverse('buildings')}?address={typed}")
     connection = Connection.objects.filter(base_url=base).first() or Connection(base_url=base, created_by=request.user)
     buildings.apply_manifest(connection, manifest)
+    buildings.fetch_icon(connection)
     connection.state = secrets.token_urlsafe(24)
     connection.save()
     remember_address(request)
@@ -93,6 +95,7 @@ def building_refresh(request, pk):
     connection = get_object_or_404(Connection, pk=pk)
     try:
         buildings.apply_manifest(connection, buildings.fetch_manifest(connection.base_url))
+        buildings.fetch_icon(connection)
         alive = buildings.ping(connection)
     except BuildingError as error:
         messages.error(request, str(error))
@@ -121,3 +124,21 @@ def building_disconnect(request, pk):
     note = f" Paused {len(using)} workflow{'' if len(using) == 1 else 's'} that used it." if using else ''
     messages.success(request, f'{name} is disconnected.{note}')
     return redirect('buildings')
+
+
+@login_required
+def building_icon(request, pk):
+    """A connected building's logo, from the copy fetched when it was connected or checked.
+
+    It came from another server, so it is only ever shown as an image, and is served with a
+    policy that lets it do nothing else even if opened by itself.
+    """
+    import base64
+    connection = get_object_or_404(Connection, pk=pk)
+    if not connection.icon_data or connection.icon_type not in buildings.ICON_TYPES:
+        raise Http404
+    response = HttpResponse(base64.b64decode(connection.icon_data), content_type=connection.icon_type)
+    response['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    response['X-Content-Type-Options'] = 'nosniff'
+    response['Cache-Control'] = 'private, max-age=86400'
+    return response

@@ -1,8 +1,7 @@
 """Running workflows.
 
-`start_run` records a run with the trigger's data; `execute` works through the steps
-(a tree: If and Switch steps run one of their branches, then the steps after them),
-writing a RunStep per step it does. A step that hits a network error or a 5xx is tried again after
+`start_run` records a run with the trigger's data; `execute` follows the wiring from
+the trigger (an If or Switch leaves by one of its outputs), writing a RunStep per step it does. A step that hits a network error or a 5xx is tried again after
 `settings.STEP_RETRY_WAITS`; a 4xx fails at once. A failed run can be retried from the step
 that failed (`retry`): earlier steps' results are kept, and every action call carries an
 Idempotency-Key made from the run and the step, so nothing is ever done twice.
@@ -108,18 +107,16 @@ def perform(step, definition, ctx, connections, secrets, dedupe):
         return {'result': result, 'branch': 'true' if result else 'false'}, values, 'True' if result else 'False'
     if node == 'switch':
         on = values.get('on')
-        for branch in step.get('branches') or []:
-            if branch['id'] == 'default':
-                continue
-            first = templating.resolve(branch.get('value', ''), ctx, secrets)
-            if branch.get('op') == 'between':
+        for case in step.get('cases') or []:
+            first = templating.resolve(case.get('value', ''), ctx, secrets)
+            if case.get('op') == 'between':
                 hit = (templating.compare(on, 'gte', first)
-                       and templating.compare(on, 'lte', templating.resolve(branch.get('value2', ''), ctx, secrets)))
+                       and templating.compare(on, 'lte', templating.resolve(case.get('value2', ''), ctx, secrets)))
             else:
-                hit = templating.compare(on, branch.get('op') or 'eq', first)
+                hit = templating.compare(on, case.get('op') or 'eq', first)
             if hit:
-                label = nodes.branch_label(step, branch)
-                return {'matched': True, 'branch': branch['id'], 'case': label}, values, label
+                label = nodes.port_label(step, case['id'])
+                return {'matched': True, 'branch': case['id'], 'case': label}, values, label
         return {'matched': False, 'branch': 'default', 'case': 'Otherwise'}, values, 'Otherwise'
     if node == 'http':
         body = values.get('body')
@@ -157,7 +154,7 @@ def perform_with_retries(step, definition, ctx, connections, secrets, dedupe, wa
 
 def start_run(workflow, trigger_output, label, event=None, is_test=False, from_failure=False):
     """Record a queued run. Returns None when this event already started one for the workflow."""
-    steps = workflow.steps or []
+    steps = nodes.upgrade(workflow.steps)
     if not steps:
         return None
     run = Run(
@@ -186,6 +183,7 @@ def execute(run):
 
     Steps that already have a result (the trigger, and everything before the failed step on
     a retry) are not done again; an If or Switch that already decided keeps its decision.
+    A step is never done twice in one run, so a loop in the wiring just ends the run.
     """
     if not Run.objects.filter(pk=run.pk, status=Run.QUEUED).update(status=Run.RUNNING, started_at=timezone.now()):
         return None
@@ -206,9 +204,13 @@ def execute(run):
                     'output': None, 'error': '', 'note': '', **result}
         RunStep.objects.update_or_create(run=run, uid=step['uid'], defaults=defaults)
 
-    def run_list(steps):
-        for step in steps:
+    def follow(steps):
+        """From the trigger, do a step, leave by one of its outputs, and go where that leads."""
+        by_uid = {step['uid']: step for step in steps}
+        step, visited = (steps[0] if steps else None), set()
+        while step is not None and step['uid'] not in visited:
             uid = step['uid']
+            visited.add(uid)
             definition = nodes.describe(step, connections)
             if uid in ctx and uid in done:
                 output = ctx[uid]
@@ -235,14 +237,12 @@ def execute(run):
                 ctx[uid] = output
                 record(step, definition, status=RunStep.OK, output=output, sent=_redact(sent, secrets), note=note,
                        tries=tries, duration_ms=took())
-            if step.get('node') in nodes.BRANCHING and isinstance(output, dict):
-                chosen = next((b for b in step.get('branches') or [] if b['id'] == output.get('branch')), None)
-                if chosen:
-                    run_list(chosen.get('steps') or [])
+            port = output.get('branch') if step.get('node') in nodes.BRANCHING and isinstance(output, dict) else 'main'
+            step = by_uid.get((step.get('next') or {}).get(port))
 
     status, error, failed_uid = Run.SUCCEEDED, '', ''
     try:
-        run_list(run.steps)
+        follow(nodes.upgrade(run.steps))
     except _Halt as halt:
         status, error, failed_uid = halt.status, halt.error, halt.uid
 

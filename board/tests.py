@@ -194,7 +194,8 @@ class EngineTests(Base):
         self.assertEqual(issue['json'], {'staff_id': '12', 'amount': 10.0, 'label': 'Volunteer meal card',
                                          'replace_previous': True})
         self.assertTrue(issue['headers']['Idempotency-Key'].startswith('sb_'))
-        self.assertEqual([s.status for s in run.step_results.all()], ['ok', 'ok', 'ok', 'ok'])
+        self.assertEqual([s.title for s in run.step_results.all()],
+                         ['Volunteer reached a level', 'Find staff member', 'Filter', 'Switch', 'Issue staff card'])
 
     def test_amount_follows_the_level(self):
         self.recipe()
@@ -253,7 +254,7 @@ class EngineTests(Base):
         self.world.on('POST', issue, (500, {'error': {'code': 'server_error', 'message': 'Oops.'}}))
         self.deliver(self.th, self.level_event())
         run = workflow.runs.get()
-        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, workflow.steps[3]['uid']))
+        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, workflow.steps[5]['uid']))
         first_key = self.world.to(issue)[0]['headers']['Idempotency-Key']
         finds = len(self.world.to('https://pv.test/switchboard/v1/actions/staff.find'))
 
@@ -264,7 +265,7 @@ class EngineTests(Base):
         self.assertEqual((run.status, run.retries), (Run.SUCCEEDED, 1))
         self.assertEqual(self.world.to(issue)[-1]['headers']['Idempotency-Key'], first_key)
         self.assertEqual(len(self.world.to('https://pv.test/switchboard/v1/actions/staff.find')), finds)
-        self.assertEqual(run.step_results.count(), 4)
+        self.assertEqual(run.step_results.count(), 5)
 
     def test_revoked_key_marks_the_building_broken(self):
         workflow = self.recipe()
@@ -381,7 +382,7 @@ class BranchTests(Base):
         self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'f', 'i', 'e', 'after'])
         self.assertEqual(self.world.to(self.issue), [])
         page = self.client.get(reverse('runs'))
-        self.assertContains(page, 'Took the False branch')
+        self.assertContains(page, 'Went out of False')
         self.assertContains(page, 'Add staff member')
         self.assertNotContains(page, 'Issue staff card')   # the branch not taken isn't listed
 
@@ -450,18 +451,43 @@ class BranchTests(Base):
         self.assertEqual(run.status, Run.STOPPED)
         self.assertEqual(self.world.to('https://chat.test/send'), [])
 
-    def test_helpers_know_the_tree(self):
-        steps = self.if_workflow().steps
-        self.assertEqual([s['uid'] for s in nodes.walk(steps)], ['t', 'f', 'i', 'c', 'e', 'after'])
-        self.assertEqual([s['uid'] for s in nodes.before(steps, 'e')], ['t', 'f', 'i'])       # not its sibling branch
+    def test_older_trees_are_rewired_into_a_graph(self):
+        steps = nodes.upgrade(self.if_workflow().steps)
+        wires = {s['uid']: s['next'] for s in steps}
+        self.assertEqual(wires, {'t': {'main': 'f'}, 'f': {'main': 'i'}, 'i': {'true': 'c', 'false': 'e'},
+                                 'c': {'main': 'after'}, 'e': {'main': 'after'}, 'after': {}})
+        self.assertIs(nodes.upgrade(steps), steps)
+        self.assertEqual([s['uid'] for s in nodes.before(steps, 'e')], ['t', 'f', 'i'])       # not the other output
         self.assertEqual([s['uid'] for s in nodes.before(steps, 'after')], ['t', 'f', 'i', 'c', 'e'])
+        switch = nodes.find(self.switch_workflow().steps, 's')
+        self.assertEqual(nodes.ports(switch), ['a', 'b', 'c', 'default'])
+        self.assertEqual(switch['next'], {'a': 'ka', 'b': 'kb', 'c': 'kc'})
+        self.assertEqual([nodes.port_label(switch, p) for p in nodes.ports(switch)],
+                         ['is at most 2', 'Level three', 'is between 4 and 6', 'Otherwise'])
+
+    def test_problems_only_count_steps_wired_to_the_trigger(self):
         connections = {self.th.id: self.th, self.pv.id: self.pv}
+        steps = nodes.upgrade(self.if_workflow().steps)
         self.assertEqual(nodes.problems(steps, connections), [])
-        steps[2]['branches'][1]['steps'][0]['params']['email'] = ''
+        nodes.find(steps, 'e')['params']['email'] = ''
         self.assertEqual(nodes.problems(steps, connections), ['"Add staff member" needs email.'])
-        self.assertEqual(nodes.problems(self.switch_workflow().steps[:2] + [
-            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.level}}'}, 'branches': nodes.new_branches('switch')}],
-            connections), ['A Switch case has nothing to compare with.'])
+        nodes.find(steps, 'i')['next'].pop('false')         # unplug it: it can't run, so it can't be wrong
+        self.assertEqual(nodes.problems(steps, connections), [])
+        steps.append({'uid': 's', 'node': 'switch', 'params': {'on': '{{t.level}}'}, 'cases': nodes.new_cases(), 'next': {}})
+        nodes.find(steps, 'after')['next'] = {'main': 's'}
+        self.assertEqual(nodes.problems(steps, connections), ['A Switch case has nothing to compare with.'])
+
+    def test_an_unconnected_output_just_ends_the_run(self):
+        workflow = self.if_workflow()
+        steps = nodes.upgrade(workflow.steps)
+        nodes.find(steps, 'i')['next'].pop('false')
+        workflow.steps = steps
+        workflow.save()
+        self.world.on('POST', self.find, (200, {'found': False}))
+        self.deliver(self.th, self.level_event())
+        run = workflow.runs.get()
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'f', 'i'])
 
 
 class BranchBuilderTests(Base):
@@ -469,33 +495,51 @@ class BranchBuilderTests(Base):
         return self.client.post(reverse(f'workflow_{name}', args=[workflow.pk]), json.dumps(body),
                                 content_type='application/json')
 
-    def test_save_keeps_branches_and_cleans_them(self):
+    def test_save_keeps_wiring_and_cleans_it(self):
         workflow = Workflow.objects.create(name='New')
+        http = lambda uid, **more: {'uid': uid, 'node': 'http', 'params': {'url': 'https://a.test'}, 'next': {}, **more}  # noqa: E731
         steps = [
-            {'uid': 't', 'node': 'manual', 'params': {}},
+            http('h1', x=120.6, y='40', next={'main': 't'}),                       # a wire into the trigger
+            {'uid': 't', 'node': 'manual', 'params': {}, 'next': {'main': 'i', 'bogus': 'h1'}},
             {'uid': 'i', 'node': 'if', 'params': {'left': '{{t.started_by}}', 'op': 'eq', 'right': 'andrew'},
-             'branches': [{'id': 'false', 'steps': [{'uid': 'x', 'node': 'evil'}]},
-                          {'id': 'bogus', 'steps': [{'uid': 'h9', 'node': 'http', 'params': {'url': 'https://a.test'}}]}]},
-            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.started_by}}'}, 'branches': [
-                {'id': 'c1', 'op': 'nonsense', 'value': 'andrew', 'steps': [
-                    {'uid': 't', 'node': 'http', 'params': {'url': 'https://dup.test'}},   # a uid used twice
-                    {'uid': 'h1', 'node': 'http', 'params': {'url': 'https://a.test'}}]},
-                {'id': 'c1', 'op': 'eq', 'value': 'again'},
-                {'id': 'default', 'steps': 'not a list'}]},
+             'next': {'true': 'h1', 'false': 's', 'main': 'h2'}},
+            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.started_by}}'}, 'x': 'far', 'next': {
+                'c1': 'h2', 'c1b': 'h2', 'default': 'i', 'ghost': 'h2'}, 'cases': [
+                {'id': 'c1', 'op': 'nonsense', 'value': 'andrew'}, {'id': 'c1', 'op': 'eq', 'value': 'again'},
+                {'id': 'default', 'value': 'x'}, {'id': 'c1b', 'op': 'between', 'value': '1', 'value2': '2'}]},
+            http('h2', next={'main': 'h2'}),                                        # a wire to itself
+            http('t'), {'uid': 'x', 'node': 'evil', 'next': {}},
         ]
         answer = self.post('save', workflow, {'steps': steps}).json()
         self.assertEqual(answer['problems'], [])
         workflow.refresh_from_db()
-        branch_ids = lambda step: [b['id'] for b in step['branches']]  # noqa: E731
-        self.assertEqual(branch_ids(workflow.steps[1]), ['true', 'false'])
-        self.assertEqual(workflow.steps[1]['branches'][1]['steps'], [])
-        self.assertEqual(branch_ids(workflow.steps[2]), ['c1', 'default'])
-        self.assertEqual(workflow.steps[2]['branches'][0]['op'], 'eq')
-        self.assertEqual([s['uid'] for s in workflow.steps[2]['branches'][0]['steps']], ['h1'])
+        by_uid = {s['uid']: s for s in workflow.steps}
+        self.assertEqual([s['uid'] for s in workflow.steps], ['t', 'h1', 'i', 's', 'h2'])   # trigger first
+        self.assertEqual(by_uid['t']['next'], {'main': 'i'})
+        self.assertEqual(by_uid['h1'], {**by_uid['h1'], 'x': 121, 'y': 40, 'next': {}})
+        self.assertEqual(by_uid['i']['next'], {'true': 'h1', 'false': 's'})
+        self.assertEqual([c['id'] for c in by_uid['s']['cases']], ['c1', 'c1b'])
+        self.assertEqual(by_uid['s']['cases'][0]['op'], 'eq')
+        self.assertEqual(by_uid['s']['next'], {'c1': 'h2', 'c1b': 'h2'})         # the loop back to the If is gone
+        self.assertEqual((by_uid['s']['x'], by_uid['h2']['next']), (None, {}))
         page = self.client.get(reverse('builder', args=[workflow.pk]))
         self.assertEqual([d['title'] for d in page.context['data']['catalog']['steps']['basics']],
                          ['Filter', 'If', 'Switch', 'Send an HTTP request'])
-        self.assertContains(self.client.get(reverse('workflows')), '4 steps')
+        self.assertContains(self.client.get(reverse('workflows')), '5 steps')
+
+    def test_older_tree_workflows_still_open_and_save(self):
+        workflow = Workflow.objects.create(name='Old', steps=[
+            {'uid': 't', 'node': 'manual', 'params': {}},
+            {'uid': 'i', 'node': 'if', 'params': {'left': 'x', 'op': 'not_empty'}, 'branches': [
+                {'id': 'true', 'steps': [{'uid': 'h', 'node': 'http', 'params': {'url': 'https://a.test'}}]},
+                {'id': 'false', 'steps': 'not a list'}]},
+        ])
+        sent = self.client.get(reverse('builder', args=[workflow.pk])).context['data']['workflow']['steps']
+        self.assertEqual([(s['uid'], s['next']) for s in sent], [('t', {'main': 'i'}), ('i', {'true': 'h'}), ('h', {})])
+        self.post('save', workflow, {'steps': workflow.steps})
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.steps[1]['next'], {'true': 'h'})
+        self.assertNotIn('branches', workflow.steps[1])
 
     def test_test_step_on_an_if_and_inside_a_branch(self):
         workflow = Workflow.objects.create(name='New')
@@ -641,6 +685,32 @@ class ConnectTests(Base):
         self.assertEqual(Connection.objects.count(), 0)
         self.assertEqual(self.client.get(reverse('building_callback'), {'state': 'made-up', 'code': 'x'}).status_code, 302)
 
+    def test_logo_comes_from_the_manifest_and_is_only_ever_an_image(self):
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64"/></svg>'
+        self.world.on('GET', 'https://bt.test/.well-known/switchboard', (200, {
+            **PV_MANIFEST, 'building': 'bell-tower', 'name': 'Bell Tower', 'icon': '/static/mark.svg',
+            'authorize_url': 'https://bt.test/a', 'token_url': 'https://bt.test/t', 'api_base': 'https://bt.test/v1'}))
+        self.world.on('GET', 'https://bt.test/static/mark.svg', (200, svg))
+        self.client.post(reverse('building_connect'), {'address': 'bt.test'})
+        connection = Connection.objects.get()
+        self.assertEqual(connection.icon_type, 'image/svg+xml')
+        tile = buildings.look(connection.building, connection.name, connection)
+        self.assertTrue(tile['img'].startswith(reverse('building_icon', args=[connection.pk])))
+        response = self.client.get(reverse('building_icon', args=[connection.pk]))
+        self.assertEqual((response.content, response['Content-Type']), (svg, 'image/svg+xml'))
+        self.assertIn("default-src 'none'", response['Content-Security-Policy'])
+        # Not an image: the old logo stays.
+        self.world.on('GET', 'https://bt.test/static/mark.svg', (200, b'<html><script>alert(1)</script></html>'))
+        self.assertFalse(buildings.fetch_icon(connection))
+        self.assertEqual(connection.icon_type, 'image/svg+xml')
+
+    def test_known_buildings_have_a_logo_without_asking_and_others_get_initials(self):
+        pavilion = connect(PV_MANIFEST, 'pv.test')
+        self.assertEqual(buildings.look('pavilion', 'Pavilion', pavilion)['img'], '/static/board/buildings/pavilion.svg')
+        self.assertEqual(buildings.look('bell-tower', 'Bell Tower')['code'], 'BT')
+        self.assertEqual(self.client.get(reverse('building_icon', args=[pavilion.pk])).status_code, 404)
+        self.assertContains(self.client.get(reverse('buildings')), '/static/board/buildings/pavilion.svg')
+
     def test_not_a_building(self):
         self.world.on('GET', 'https://example.org/.well-known/switchboard', (200, b'<html>hello</html>'))
         page = self.client.post(reverse('building_connect'), {'address': 'example.org'}, follow=True)
@@ -711,10 +781,12 @@ class PageTests(Base):
         response = self.client.post(reverse('workflow_new'), {'recipe': 'staff-cards'})
         workflow = Workflow.objects.get()
         self.assertRedirects(response, reverse('builder', args=[workflow.pk]))
-        self.assertEqual(len(workflow.steps), 4)
+        self.assertEqual(len(workflow.steps), 7)
         self.client.post(reverse('workflow_duplicate', args=[workflow.pk]))
         copy = Workflow.objects.exclude(pk=workflow.pk).get()
         self.assertNotEqual(copy.steps[0]['uid'], workflow.steps[0]['uid'])
+        self.assertEqual(copy.steps[0]['next'], {'main': copy.steps[1]['uid']})
+        self.assertEqual(set(copy.steps[3]['next'].values()), {s['uid'] for s in copy.steps[4:]})
         self.assertIn(copy.steps[0]['uid'], copy.steps[1]['params']['email'])
         self.assertEqual(nodes.problems(copy.steps, {self.th.id: self.th, self.pv.id: self.pv}), [])
         folder = Folder.objects.create(name='Restaurant')
@@ -730,7 +802,7 @@ class PageTests(Base):
         page = self.client.get(reverse('runs'))
         self.assertContains(page, 'Town Hall · Maria K. reached level 3')
         self.assertContains(page, 'so the workflow stopped here')
-        self.assertContains(page, 'Issue staff card')   # the step that never got a turn
+        self.assertContains(page, 'Switch')   # next in line, but it never got a turn
         self.assertNotContains(self.client.get(reverse('runs'), {'status': 'failed'}), 'Maria K.')
         self.assertContains(self.client.get(reverse('runs'), {'workflow': workflow.pk, 'days': 1}), 'Maria K.')
 
@@ -768,10 +840,11 @@ class BuilderTests(Base):
         workflow = self.recipe()
         steps = workflow.steps + [{'uid': 'bad uid!', 'node': 'http'}, {'uid': 'x1', 'node': 'evil'},
                                   {'uid': 'h1', 'node': 'http', 'params': {'url': '', 'junk': {'a': 1}}}]
+        steps[4]['next'] = {'main': 'h1'}       # after the $5 card
         response = self.post('save', workflow, {'name': '  Cards  ', 'steps': steps}).json()
         workflow.refresh_from_db()
         self.assertEqual(workflow.name, 'Cards')
-        self.assertEqual(len(workflow.steps), 5)
+        self.assertEqual(len(workflow.steps), 8)
         self.assertEqual(response['problems'], ['"Send an HTTP request" needs url.'])
         self.assertTrue(response['paused'])
         self.assertFalse(workflow.enabled)
@@ -810,7 +883,7 @@ class BuilderTests(Base):
         self.world.on('POST', 'https://pv.test/switchboard/v1/actions/staff_card.issue', (200, {'card_id': '7'}))
         result = self.post('test', workflow, {'steps': workflow.steps}).json()
         self.assertEqual((result['ok'], result['status']), (True, 'succeeded'))
-        self.assertEqual([s['status'] for s in result['steps']], ['ok'] * 4)
+        self.assertEqual(sorted(s['status'] for s in result['steps']), ['ok'] * 5 + ['skipped'] * 2)
         run = workflow.runs.get()
         self.assertTrue(run.is_test)
         self.assertNotContains(self.client.get(reverse('runs')), 'Test · Volunteer reached a level')

@@ -44,16 +44,16 @@ def _cards(workflows, connections):
         tiles, seen = [], set()
         for step in nodes.walk(workflow.steps):
             tile = nodes.describe(step, connections)
-            key = tile['tile'].get('code') or tile['tile'].get('icon')
+            key = tile['tile'].get('img') or tile['tile'].get('code') or tile['tile'].get('icon')
             if key not in seen and len(tiles) < 4:
                 seen.add(key)
-                tiles.append({**tile['tile'], 'label': tile['kind'] if 'code' in tile['tile'] else tile['title']})
+                tiles.append({**tile['tile'], 'label': tile['tile'].get('label') or tile['title']})
         strip = [{'succeeded': 'ok', 'failed': 'bad'}.get(r.status, 'idle') for r in reversed(runs)]
         strip = ['none'] * (STRIP - len(strip)) + strip
         state = state_of(workflow, runs[0] if runs else None)
         cards.append({
             'workflow': workflow, 'tiles': tiles, 'state': state, 'state_label': STATE_LABELS[state],
-            'strip': strip, 'steps': sum(1 for _ in nodes.walk(workflow.steps)), 'total': totals.get(workflow.id, 0),
+            'strip': strip, 'steps': len(workflow.steps), 'total': totals.get(workflow.id, 0),
             'last': runs[0].created_at if runs else None,
         })
     return cards
@@ -118,11 +118,14 @@ def workflow_delete(request, pk):
 @require_POST
 def workflow_duplicate(request, pk):
     source = get_object_or_404(Workflow, pk=pk)
-    steps = copy.deepcopy(source.steps)
+    steps = copy.deepcopy(nodes.upgrade(source.steps))
     renamed = {step['uid']: 's' + secrets.token_hex(4) for step in steps}
+    for step in steps:
+        step['uid'] = renamed[step['uid']]
+        step['next'] = {port: renamed[target] for port, target in (step.get('next') or {}).items() if target in renamed}
     text = json.dumps(steps)
     for old, new in renamed.items():
-        text = text.replace('{{' + old + '.', '{{' + new + '.').replace(f'"uid": "{old}"', f'"uid": "{new}"')
+        text = text.replace('{{' + old + '.', '{{' + new + '.')
     copy_ = Workflow.objects.create(
         name=f'{source.name} (copy)'[:120], description=source.description, folder=source.folder,
         steps=json.loads(text), paused_at=timezone.now(),

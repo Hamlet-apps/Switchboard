@@ -18,6 +18,7 @@ All bodies are JSON (UTF-8). All paths below are fixed and sit outside any langu
   "building": "town-hall",
   "name": "Town Hall",
   "instance": "Holy Eucharist Cathedral",
+  "icon": "https://volunteers.example.org/static/base/town-hall.svg",
   "authorize_url": "https://volunteers.example.org/switchboard/authorize",
   "token_url": "https://volunteers.example.org/switchboard/v1/token",
   "api_base": "https://volunteers.example.org/switchboard/v1",
@@ -57,6 +58,11 @@ All bodies are JSON (UTF-8). All paths below are fixed and sit outside any langu
 
 - `building` is the product's slug (`town-hall`, `pavilion`), `name` the product's name,
   `instance` the organization's name as set in that building.
+- `icon` (optional) is the address of the building's logo: a square SVG (or PNG, WebP or
+  JPEG) under 200 KB that looks right at 20 to 56 pixels, with its own background, like an
+  app icon. Switchboard fetches it when the building is connected or checked again, keeps a
+  copy, and draws every step of that building with it. Without one, the building is drawn
+  with its initials.
 - URLs are absolute and built from the request's host (https behind a proxy).
 - `triggers[].type` and `actions[].name` are lowercase, dot-separated, and stable: workflows
   store them. Titles and descriptions are for people, in plain language, in English.

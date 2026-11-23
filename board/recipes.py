@@ -14,24 +14,28 @@ def _tok(uid, key):
 
 
 def _staff_cards(th, pv):
-    trigger, find, check, card = _uid(), _uid(), _uid(), _uid()
-    return [
-        {'uid': trigger, 'node': 'event', 'connection': th.id, 'key': 'volunteer.level_reached', 'params': {}},
-        {'uid': find, 'node': 'action', 'connection': pv.id, 'key': 'staff.find',
-         'params': {'email': _tok(trigger, 'person.email')}},
-        {'uid': check, 'node': 'condition', 'connection': None, 'key': '',
-         'params': {'left': _tok(find, 'found'), 'op': 'true', 'right': ''}},
-        {'uid': card, 'node': 'action', 'connection': pv.id, 'key': 'staff_card.issue', 'params': {
-            'staff_id': _tok(find, 'staff_id'),
-            'amount': {'map': {'on': _tok(trigger, 'level'), 'rules': [
-                {'op': 'lte', 'value': '2', 'then': '5'},
-                {'op': 'eq', 'value': '3', 'then': '10'},
-                {'op': 'gte', 'value': '4', 'then': '15'},
-            ], 'else': '5'}},
+    trigger, find, check, level = _uid(), _uid(), _uid(), _uid()
+
+    def card(amount):
+        return {'uid': _uid(), 'node': 'action', 'connection': pv.id, 'key': 'staff_card.issue', 'next': {}, 'params': {
+            'staff_id': _tok(find, 'staff_id'), 'amount': amount,
             # In Pavilion the label is the card type's name, so one label for everyone.
-            'label': 'Volunteer meal card',
-            'replace_previous': 'true',
-        }},
+            'label': 'Volunteer meal card', 'replace_previous': 'true'}}
+
+    five, ten, fifteen = card('5'), card('10'), card('15')
+    return [
+        {'uid': trigger, 'node': 'event', 'connection': th.id, 'key': 'volunteer.level_reached', 'params': {},
+         'next': {'main': find}},
+        {'uid': find, 'node': 'action', 'connection': pv.id, 'key': 'staff.find',
+         'params': {'email': _tok(trigger, 'person.email')}, 'next': {'main': check}},
+        {'uid': check, 'node': 'condition', 'connection': None, 'key': '',
+         'params': {'left': _tok(find, 'found'), 'op': 'true', 'right': ''}, 'next': {'main': level}},
+        {'uid': level, 'node': 'switch', 'connection': None, 'key': '', 'params': {'on': _tok(trigger, 'level')},
+         'cases': [{'id': 'c1', 'op': 'lte', 'value': '2', 'value2': '', 'label': 'Level 1 to 2'},
+                   {'id': 'c2', 'op': 'eq', 'value': '3', 'value2': '', 'label': 'Level 3'},
+                   {'id': 'c3', 'op': 'gte', 'value': '4', 'value2': '', 'label': 'Level 4 and up'}],
+         'next': {'c1': five['uid'], 'c2': ten['uid'], 'c3': fifteen['uid']}},
+        five, ten, fifteen,
     ]
 
 
@@ -92,7 +96,7 @@ def available(connections):
     out = []
     for recipe in RECIPES:
         chosen, missing = _match(recipe, connections)
-        tiles = [{**buildings.look(slug), 'label': NAMES.get(slug, slug)} for slug in recipe['needs']]
+        tiles = [buildings.look(slug, NAMES.get(slug, slug)) for slug in recipe['needs']]
         out.append({**{k: recipe[k] for k in ('id', 'name', 'description', 'fill_in')},
                     'ready': not missing, 'missing': missing, 'tiles': tiles})
     return out

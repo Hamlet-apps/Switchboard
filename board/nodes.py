@@ -68,8 +68,7 @@ BUILTIN = {
     },
     'if': {
         'icon': 'call_split', 'kind': 'Logic', 'title': 'If',
-        'desc': 'Checks a condition and goes one of two ways: the True branch or the False branch. '
-                'Steps after it run whichever way it went.',
+        'desc': 'Checks a condition and sends the run out of one of two outputs: True or False.',
         'params': [
             {'key': 'left', 'label': 'Check this field', 'type': 'string', 'required': True},
             {'key': 'op', 'label': 'It', 'type': 'choice', 'default': 'true', 'plain': True, 'choices': _choices(OPS)},
@@ -80,8 +79,7 @@ BUILTIN = {
     },
     'switch': {
         'icon': 'alt_route', 'kind': 'Logic', 'title': 'Switch',
-        'desc': 'Looks at one field and takes the first case that matches, or Otherwise when none does. '
-                'Steps after it run whichever case was taken.',
+        'desc': 'Looks at one field and sends the run out of the first case that matches, or Otherwise when none does.',
         'params': [
             {'key': 'on', 'label': 'Look at this field', 'type': 'string', 'required': True},
         ],
@@ -107,7 +105,6 @@ BUILTIN = {
 TRIGGER_BASICS = ['manual', 'schedule', 'webhook', 'failure']
 STEP_BASICS = ['condition', 'if', 'switch', 'http']
 BRANCHING = ('if', 'switch')
-MAX_DEPTH = 4
 
 
 def _builtin(node):
@@ -144,7 +141,7 @@ def _event(connection, trigger):
         'id': f"event:{connection.id}:{trigger['type']}", 'node': 'event', 'connection': connection.id,
         'key': trigger['type'], 'trigger': True,
         'title': str(trigger.get('title') or trigger['type']), 'desc': str(trigger.get('description') or ''),
-        'kind': connection.name, 'tile': buildings.look(connection.building, connection.name),
+        'kind': connection.name, 'tile': buildings.look(connection.building, connection.name, connection),
         'params': [], 'out': _fields(trigger.get('fields')), 'summary': str(trigger.get('summary') or ''),
     }
 
@@ -156,7 +153,7 @@ def _action(connection, action):
         'key': action['name'], 'trigger': False, 'lookup': lookup,
         'title': str(action.get('title') or action['name']), 'desc': str(action.get('description') or ''),
         'kind': f"{connection.name} · {'Look up' if lookup else 'Action'}",
-        'tile': buildings.look(connection.building, connection.name),
+        'tile': buildings.look(connection.building, connection.name, connection),
         'params': [_param(p) for p in action.get('params') or [] if isinstance(p, dict) and p.get('key')],
         'out': _fields(action.get('output')),
     }
@@ -194,7 +191,7 @@ def catalog(connections):
     def building(connection, items, word):
         return {
             'connection': connection.id, 'name': connection.name, 'instance': connection.instance,
-            'tile': buildings.look(connection.building, connection.name),
+            'tile': buildings.look(connection.building, connection.name, connection),
             'broken': connection.status == connection.BROKEN,
             'sub': f"{len(items)} {word}{'' if len(items) == 1 else 's'} · "
                    + ('needs reconnecting' if connection.status == connection.BROKEN else 'connected'),
@@ -237,74 +234,153 @@ def visible(param, values):
     return True
 
 
-# --- the step tree ----------------------------------------------------------------------------
-# An If or Switch step holds its branches: [{"id", "steps": [...]}, …]. If has "true" and
-# "false"; Switch has one per case ({"id", "op", "value", "value2", "label"}) and "default".
+# --- the step graph ---------------------------------------------------------------------------
+# Steps are a flat list wired together like a patch panel. Every step has `next`, a map from
+# each of its outputs to the uid of the step that output leads to:
+#   most steps      {"main": uid}
+#   If              {"true": uid, "false": uid}
+#   Switch          {<case id>: uid, …, "default": uid}   with its cases in step["cases"]
+# An output can be left unconnected (the run ends there), and several outputs may lead to the
+# same step. `x`/`y` are where the step sits on the canvas. The trigger is always first.
 
-def new_branches(node):
-    if node == 'if':
-        return [{'id': 'true', 'steps': []}, {'id': 'false', 'steps': []}]
-    if node == 'switch':
-        return [{'id': 'c1', 'op': 'eq', 'value': '', 'value2': '', 'label': '', 'steps': []},
-                {'id': 'default', 'steps': []}]
-    return None
-
-
-def branch_label(step, branch):
-    """What a branch is called on the canvas and in the run log."""
+def ports(step):
+    """The names of a step's outputs, in the order they are drawn."""
     if step.get('node') == 'if':
-        return 'True' if branch['id'] == 'true' else 'False'
-    if branch['id'] == 'default':
+        return ['true', 'false']
+    if step.get('node') == 'switch':
+        return [case['id'] for case in step.get('cases') or []] + ['default']
+    return ['main']
+
+
+def new_cases():
+    return [{'id': 'c1', 'op': 'eq', 'value': '', 'value2': '', 'label': ''}]
+
+
+def port_label(step, port):
+    """What an output is called on the canvas and in the run log."""
+    if step.get('node') == 'if':
+        return 'True' if port == 'true' else 'False'
+    if step.get('node') != 'switch':
+        return ''
+    if port == 'default':
         return 'Otherwise'
-    if branch.get('label'):
-        return branch['label']
-    words = dict(MAP_OPS).get(branch.get('op'), 'is')
-    if branch.get('op') == 'between':
-        return f"{words} {branch.get('value', '')} and {branch.get('value2', '')}"
-    return f"{words} {branch.get('value', '')}".strip()
+    case = next((c for c in step.get('cases') or [] if c['id'] == port), None)
+    if case is None:
+        return ''
+    if case.get('label'):
+        return case['label']
+    words = dict(MAP_OPS).get(case.get('op'), 'is')
+    if case.get('op') == 'between':
+        return f"{words} {case.get('value', '')} and {case.get('value2', '')}"
+    return f"{words} {case.get('value', '')}".strip()
+
+
+def upgrade(steps):
+    """Steps in today's shape. Older workflows kept a plain list, or a tree with `branches`
+    inside If and Switch steps; both are rewired into the graph here (without positions: the
+    builder lays those out)."""
+    steps = steps or []
+    if all('next' in step for step in steps):
+        return steps
+    if any('next' in step for step in steps):       # wired, with a step or two missing its map
+        return [step if 'next' in step else {**step, 'next': {}} for step in steps]
+    out = []
+
+    def build(items, dangling):
+        """Add `items` in order, joined to the open outputs in `dangling`; returns the open
+        outputs they leave behind."""
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or 'uid' not in item:
+                continue
+            step = {k: v for k, v in item.items() if k != 'branches'}
+            step['next'] = {}
+            out.append(step)
+            for source, port in dangling:
+                source['next'][port] = step['uid']
+            if item.get('node') in BRANCHING:
+                branches = [b for b in item.get('branches') or [] if isinstance(b, dict)] if isinstance(item.get('branches'), list) else []
+                if item['node'] == 'switch':
+                    step['cases'] = [{k: b.get(k, '') for k in ('id', 'op', 'value', 'value2', 'label')}
+                                     for b in branches if b.get('id') != 'default']
+                dangling = []
+                for port in ports(step):
+                    branch = next((b for b in branches if b.get('id') == port), {})
+                    dangling += build(branch.get('steps'), [(step, port)])
+            else:
+                dangling = [(step, 'main')]
+        return dangling
+
+    build(steps, [])
+    return out
 
 
 def walk(steps):
-    """Every step, parents before their branches, in the order the canvas shows them."""
-    for step in steps or []:
-        yield step
-        for branch in step.get('branches') or []:
-            yield from walk(branch.get('steps'))
+    return iter(upgrade(steps))
 
 
 def find(steps, uid):
-    return next((step for step in walk(steps) if step.get('uid') == uid), None)
+    return next((step for step in upgrade(steps) if step.get('uid') == uid), None)
+
+
+def reachable(steps):
+    """The steps a run can get to from the trigger, nearest first."""
+    steps = upgrade(steps)
+    by_uid = {step['uid']: step for step in steps}
+    seen, queue = [], [steps[0]['uid']] if steps else []
+    while queue:
+        uid = queue.pop(0)
+        if uid in seen or uid not in by_uid:
+            continue
+        seen.append(uid)
+        queue += [target for target in (by_uid[uid].get('next') or {}).values() if target]
+    return [by_uid[uid] for uid in seen]
 
 
 def before(steps, uid):
-    """The steps whose output `uid` can use: everything that can have run before it.
+    """The steps whose output `uid` can use: every step a run may have passed through on its
+    way there, nearest to the trigger first."""
+    steps = upgrade(steps)
+    parents = {}
+    for step in steps:
+        for target in (step.get('next') or {}).values():
+            parents.setdefault(target, []).append(step['uid'])
+    found, queue = set(), list(parents.get(uid, []))
+    while queue:
+        current = queue.pop()
+        if current not in found and current != uid:
+            found.add(current)
+            queue += parents.get(current, [])
+    return [step for step in reachable(steps) if step['uid'] in found]
 
-    Steps in a sibling branch never run in the same run, so they are left out; steps inside
-    an earlier If or Switch are kept (the step may run after either branch).
-    """
-    def search(items, seen):
-        for step in items:
-            if step.get('uid') == uid:
-                return seen
-            mine = seen + [step]
-            for branch in step.get('branches') or []:
-                found = search(branch.get('steps') or [], mine)
-                if found is not None:
-                    return found
-            seen = seen + list(walk([step]))
-        return None
-    return search(steps or [], []) or []
+
+def would_loop(steps, source, target):
+    """Whether wiring source -> target would let a run come back round to `source`."""
+    by_uid = {step['uid']: step for step in steps}
+    seen, queue = set(), [target]
+    while queue:
+        uid = queue.pop()
+        if uid == source:
+            return True
+        if uid in seen or uid not in by_uid:
+            continue
+        seen.add(uid)
+        queue += [t for t in (by_uid[uid].get('next') or {}).values() if t]
+    return False
 
 
 def problems(steps, connections):
-    """Why a workflow can't run yet, in plain words. Empty when it can."""
+    """Why a workflow can't run yet, in plain words. Empty when it can.
+
+    Only steps wired to the trigger count: a step left unconnected on the canvas never runs.
+    """
+    steps = upgrade(steps)
     if not steps:
         return ['Add a trigger first.']
     found = []
     first = describe(steps[0], connections)
     if not first['trigger']:
         found.append('The first step has to be a trigger.')
-    for index, step in enumerate(walk(steps)):
+    for index, step in enumerate(reachable(steps)):
         definition = describe(step, connections)
         if definition.get('missing'):
             found.append(f'"{definition["title"]}": {definition["desc"]}')
@@ -316,8 +392,8 @@ def problems(steps, connections):
             if param.get('required') and visible(param, values) and is_empty(values.get(param['key'])):
                 found.append(f'"{definition["title"]}" needs {param["label"].lower()}.')
         if step.get('node') == 'switch':
-            for branch in step.get('branches') or []:
-                if branch['id'] != 'default' and is_empty(branch.get('value')):
+            for case in step.get('cases') or []:
+                if is_empty(case.get('value')):
                     found.append('A Switch case has nothing to compare with.')
         connection = connections.get(step.get('connection'))
         if connection is not None and connection.status == connection.BROKEN:

@@ -59,47 +59,57 @@ def _clean_params(raw):
     return params
 
 
-def _clean_branches(node, raw, seen, depth):
-    """An If always has its two branches; a Switch has its cases and then Otherwise."""
-    given = [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
-    inner = lambda b: clean_steps(b.get('steps'), seen, depth + 1)  # noqa: E731
-    if node == 'if':
-        by_id = {b.get('id'): b for b in given}
-        return [{'id': key, 'steps': inner(by_id.get(key, {}))} for key in ('true', 'false')]
-    branches, ids = [], set()
-    for branch in given:
-        key = str(branch.get('id', ''))
-        if key == 'default' or not UID.match(key) or key in ids or len(branches) >= 12:
+def _clean_cases(raw):
+    cases, ids = [], set()
+    for case in raw if isinstance(raw, list) else []:
+        key = str(case.get('id', '')) if isinstance(case, dict) else ''
+        if key in ('default', 'main', 'true', 'false') or not UID.match(key) or key in ids or len(cases) >= 12:
             continue
         ids.add(key)
-        op = branch.get('op') if branch.get('op') in dict(MAP_OPS) else 'eq'
-        branches.append({'id': key, 'op': op, 'value': str(branch.get('value', ''))[:500],
-                         'value2': str(branch.get('value2', ''))[:500], 'label': str(branch.get('label', ''))[:60],
-                         'steps': inner(branch)})
-    default = next((b for b in given if b.get('id') == 'default'), {})
-    return branches + [{'id': 'default', 'steps': inner(default)}]
+        op = case.get('op') if case.get('op') in dict(MAP_OPS) else 'eq'
+        cases.append({'id': key, 'op': op, 'value': str(case.get('value', ''))[:500],
+                      'value2': str(case.get('value2', ''))[:500], 'label': str(case.get('label', ''))[:60]})
+    return cases or nodes.new_cases()
 
 
-def clean_steps(raw, seen=None, depth=0):
-    """Steps from the browser, keeping only what a step may hold. Walks into branches."""
-    seen = set() if seen is None else seen
-    steps = []
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict) or len(seen) >= 80:
-            continue
+def _number(value):
+    try:
+        return max(-20000, min(20000, int(round(float(value)))))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def clean_steps(raw):
+    """Steps from the browser, keeping only what a step may hold.
+
+    Wires that lead nowhere, into the trigger, or back round in a loop are dropped, and the
+    trigger is moved to the front.
+    """
+    raw = nodes.upgrade([item for item in raw if isinstance(item, dict)]) if isinstance(raw, list) else []
+    steps, seen = [], set()
+    for item in raw:
         uid, node = str(item.get('uid', '')), item.get('node')
-        if not UID.match(uid) or uid in seen or uid == 'secret' or node not in KNOWN:
-            continue
-        if node in nodes.BRANCHING and depth >= nodes.MAX_DEPTH:
+        if not UID.match(uid) or uid in seen or uid == 'secret' or node not in KNOWN or len(steps) >= 80:
             continue
         seen.add(uid)
         connection = item.get('connection') if node in ('event', 'action') else None
         step = {'uid': uid, 'node': node, 'connection': connection if isinstance(connection, int) else None,
                 'key': str(item.get('key') or '')[:120] if node in ('event', 'action') else '',
-                'params': _clean_params(item.get('params'))}
-        if node in nodes.BRANCHING:
-            step['branches'] = _clean_branches(node, item.get('branches'), seen, depth)
+                'params': _clean_params(item.get('params')),
+                'x': _number(item.get('x')), 'y': _number(item.get('y')), 'next': {}}
+        if node == 'switch':
+            step['cases'] = _clean_cases(item.get('cases'))
+        step['_wires'] = item.get('next') if isinstance(item.get('next'), dict) else {}
         steps.append(step)
+    steps.sort(key=lambda step: step['node'] not in nodes.TRIGGERS)     # stable: the trigger first
+    trigger = steps[0]['uid'] if steps and steps[0]['node'] in nodes.TRIGGERS else None
+    for step in steps:
+        wires = step.pop('_wires')
+        for port in nodes.ports(step):
+            target = wires.get(port)
+            if (isinstance(target, str) and target in seen and target not in (step['uid'], trigger)
+                    and not nodes.would_loop(steps, step['uid'], target)):
+                step['next'][port] = target
     return steps
 
 
@@ -144,7 +154,7 @@ def builder(request, pk):
     hook = request.build_absolute_uri(reverse('workflow_hook', args=[workflow.hook_token]))
     data = {
         'workflow': {'id': workflow.pk, 'name': workflow.name, 'description': workflow.description,
-                     'enabled': workflow.enabled, 'steps': workflow.steps},
+                     'enabled': workflow.enabled, 'steps': nodes.upgrade(workflow.steps)},
         'catalog': catalog, 'defs': defs, 'missing': missing, 'samples': workflow.samples,
         'hookUrl': hook, 'secrets': [s.name for s in Secret.objects.all()],
         'mapOps': [{'value': v, 'label': l} for v, l in MAP_OPS],

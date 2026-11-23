@@ -16,11 +16,10 @@ from . import crypto
 
 USER_AGENT = 'Switchboard/1.0'
 
-# How known buildings are drawn. Anything else gets its initials on a neutral tile.
-LOOKS = {
-    'town-hall': {'code': 'TH', 'bg': '#2b3a67', 'fg': '#fff6dc'},
-    'pavilion': {'code': 'PV', 'bg': '#1f4a3a', 'fg': '#f4a93b'},
-}
+# Buildings whose logo ships with Switchboard, for when the manifest doesn't bring one.
+BUNDLED = ('town-hall', 'pavilion')
+ICON_TYPES = ('image/svg+xml', 'image/png', 'image/webp', 'image/jpeg')
+ICON_LIMIT = 200_000
 
 
 class BuildingError(Exception):
@@ -33,9 +32,15 @@ class BuildingError(Exception):
         self.code = code
 
 
-def look(building, name=''):
-    if building in LOOKS:
-        return dict(LOOKS[building])
+def look(building, name='', connection=None):
+    """How a building's tile is drawn: its own logo when we have one, else its initials."""
+    from django.templatetags.static import static
+    from django.urls import reverse
+    if connection is not None and connection.icon_data:
+        stamp = int(connection.manifest_at.timestamp()) if connection.manifest_at else 0
+        return {'img': f"{reverse('building_icon', args=[connection.pk])}?v={stamp}", 'label': name}
+    if building in BUNDLED:
+        return {'img': static(f'board/buildings/{building}.svg'), 'label': name}
     words = [w for w in (name or building or '?').replace('-', ' ').split() if w]
     code = (words[0][:1] + (words[1][:1] if len(words) > 1 else words[0][1:2])).upper()
     return {'code': code or '?', 'bg': '#4a4458', 'fg': '#ffffff'}
@@ -117,6 +122,43 @@ def apply_manifest(connection, manifest):
     connection.name = manifest['name'][:80]
     connection.instance = str(manifest.get('instance') or '')[:160]
     connection.api_base = manifest['api_base'].rstrip('/')
+
+
+def _image_type(raw):
+    head = raw[:300].lstrip()
+    if head.startswith(b'\x89PNG'):
+        return 'image/png'
+    if head.startswith(b'\xff\xd8'):
+        return 'image/jpeg'
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return 'image/webp'
+    if head.startswith((b'<svg', b'<?xml')) and b'<svg' in raw[:2000]:
+        return 'image/svg+xml'
+    return ''
+
+
+def fetch_icon(connection):
+    """Keep a copy of the building's logo (the manifest's `icon`), so its steps carry it.
+
+    Best effort: a building without one, or one that can't be fetched, keeps what it had
+    (or falls back to the bundled logo or its initials).
+    """
+    import base64
+    url = connection.manifest.get('icon')
+    if not isinstance(url, str) or not url:
+        return False
+    url = urllib.parse.urljoin(connection.base_url + '/', url)
+    if urllib.parse.urlsplit(url).scheme not in ('http', 'https'):
+        return False
+    try:
+        status, raw = _http('GET', url, {'Accept': 'image/svg+xml,image/*'})
+    except BuildingError:
+        return False
+    kind = _image_type(raw) if status == 200 and raw else ''
+    if not kind or len(raw) > ICON_LIMIT:
+        return False
+    connection.icon_type, connection.icon_data = kind, base64.b64encode(raw).decode()
+    return True
 
 
 def authorize_url(connection, callback, org_name):

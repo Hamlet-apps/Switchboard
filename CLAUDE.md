@@ -30,7 +30,7 @@ One app, `board`.
 | `docs/PROTOCOL.md` | The contract with buildings. Town Hall and Pavilion implement it in their own `switchboard` apps; change it only together with them |
 | `models.py` | `Settings` (singleton, `Settings.load()`), `Secret`, `Folder`, `Connection`, `Workflow` (steps are JSON), `Event`, `Run`, `RunStep` |
 | `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
-| `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`), `compare()` for conditions, `coerce()` to a param's type |
+| `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`: no longer offered in the builder, a Switch does that; still resolved for workflows that have one), `compare()` for conditions, `coerce()` to a param's type |
 | `buildings.py` | Manifest, handshake, action calls, signature check, and the HTTP step. Every outgoing request goes through `_http` |
 | `engine.py` | `start_run`, `execute` (retries on network errors and 5xx, never 4xx), `retry` (from the failed step), `receive_event`, missed events and replay, "a workflow failed" |
 | `worker.py` | The background thread (`submit`, `kick`), schedules (`next_fire`, `fire_schedules`), pruning |
@@ -41,19 +41,30 @@ One app, `board`.
 
 ## How it works
 
-- **Steps are a tree.** `if` and `switch` steps hold `branches` (`[{"id", "steps": [...]}]`: `true`/`false`
-  for If; one per case, `{"id", "op", "value", "value2", "label"}`, then `default` for Switch). One
-  branch runs, then the steps after the If or Switch. `condition` is the Filter node (the name is
-  kept because workflows store it): it stops the whole run. Never loop over `workflow.steps` as if
-  it were flat: use `nodes.walk`, `nodes.find` and `nodes.before` (the steps a step can read from;
-  sibling branches are left out). The builder's `walk`/`locate`/`before` in `builder.js` mirror them.
+- **Steps are a wired graph**, kept as a flat list with the trigger first. Each step has `next`,
+  a map from each of its outputs to the uid it leads to (`main`; `true`/`false` for `if`; one per
+  case plus `default` for `switch`, whose cases are in `step["cases"]`), and `x`/`y`, its place on
+  the canvas. An output may be unwired (the run ends there) and several may lead to one step;
+  loops are refused. A run follows one path. `condition` is the Filter node (the name is kept
+  because workflows store it): it stops the run. Use `nodes.ports`, `nodes.reachable`,
+  `nodes.before` (the steps a step can read from) and `nodes.find`; `nodes.upgrade` turns the two
+  older shapes (a plain list, and a tree with `branches`) into this one, so call it before
+  reading stored steps. `builder.js` mirrors these (`ports`, `downstream`, `before`, `tidy`).
+- **The canvas** (`builder.js`): steps are absolutely placed `.gnode`s, wires are SVG paths drawn
+  by `drawWires()` from measured heights. Dragging from an output dot onto a step connects them
+  (`connect`), onto empty canvas opens the picker there; the + on a wire inserts a step and the
+  rest of the line carries on from the new step's first output; removing a step joins what led
+  into it to what came after. Steps without a position are laid out by `tidy()` on first render.
+- **Logos**: a building's tile comes from `buildings.look()`: the copy of its manifest `icon`
+  (`Connection.icon_data`, served by `building_icon` as an image only), else the bundled logo in
+  `static/board/buildings/<slug>.svg`, else its initials.
 - **A step** is `{"uid", "node", "connection", "key", "params"}`; the first step is the trigger.
   A param is text with tokens, or a lookup table. A setting that is exactly one token keeps
   the value's type.
 - **A run** snapshots the workflow's steps and keeps each step's output in `Run.context` by
   uid. `Run.dedupe` + the step's uid make the `Idempotency-Key`. A retry is the same run executed
-  again: steps that already have a result are skipped and an If or Switch keeps the branch it
-  took (its output holds `branch`), so nothing is done twice. `Run.failed_uid` is where it stopped. One run per (workflow, event).
+  again: steps that already have a result are skipped and an If or Switch keeps the output it
+  left by (its result holds `branch`), so nothing is done twice. `Run.failed_uid` is where it stopped. One run per (workflow, event).
 - **Events** arrive at `/hooks/building/<Connection.hook_token>`, signed with the connection's
   webhook secret. They are stored (`Event`) before anything runs; duplicates are dropped by
   (connection, event id). Events for a paused workflow show as missed calls in its builder

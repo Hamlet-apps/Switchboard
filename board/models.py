@@ -89,6 +89,9 @@ class Connection(models.Model):
     api_base = models.CharField(max_length=300, blank=True, default='')
     manifest = models.JSONField(default=dict)
     manifest_at = models.DateTimeField(null=True, blank=True)
+    # The building's own logo, fetched from the manifest's `icon` and served from here.
+    icon_type = models.CharField(max_length=40, blank=True, default='')
+    icon_data = models.TextField(blank=True, default='')   # base64
     api_key_enc = models.TextField(blank=True, default='')
     webhook_secret_enc = models.TextField(blank=True, default='')
     remote_id = models.CharField(max_length=80, blank=True, default='')

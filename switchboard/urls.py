@@ -29,6 +29,7 @@ urlpatterns = [
     path('buildings/', views.buildings_page, name='buildings'),
     path('buildings/connect/', views.building_connect, name='building_connect'),
     path('buildings/callback/', views.building_callback, name='building_callback'),
+    path('buildings/<int:pk>/icon', views.building_icon, name='building_icon'),
     path('buildings/<int:pk>/refresh/', views.building_refresh, name='building_refresh'),
     path('buildings/<int:pk>/disconnect/', views.building_disconnect, name='building_disconnect'),
 

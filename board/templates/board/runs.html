@@ -65,7 +65,7 @@
     </header>
     <ol class="run-steps">
       {% for step in selected.steps %}
-      <li class="is-{{ step.status }}"{% if step.depth %} style="margin-left: {% widthratio step.depth 1 18 %}px"{% endif %}>
+      <li class="is-{{ step.status }}">
         <span class="ms fill is-{{ step.status }}" aria-hidden="true">{% if step.status == 'ok' %}check_circle{% elif step.status == 'failed' %}error{% elif step.status == 'stopped' %}do_not_disturb_on{% else %}radio_button_unchecked{% endif %}</span>
         <div class="body">
           <b>{{ step.title }}</b>

@@ -40,35 +40,67 @@ def json_call(view):
     return wrapped
 
 
-def clean_steps(raw):
-    """Steps from the browser, keeping only what a step may hold."""
-    steps, seen = [], set()
+def _clean_params(raw):
+    params = {}
+    for key, value in raw.items() if isinstance(raw, dict) else []:
+        if isinstance(value, dict) and isinstance(value.get('map'), dict):
+            spec = value['map']
+            value = {'map': {
+                'on': str(spec.get('on', ''))[:500],
+                'rules': [{k: str(rule.get(k, ''))[:500] for k in ('op', 'value', 'value2', 'then')}
+                          for rule in spec.get('rules') or [] if isinstance(rule, dict)][:30],
+                'else': str(spec.get('else', ''))[:500],
+            }}
+        elif isinstance(value, bool):
+            value = 'true' if value else 'false'
+        else:
+            value = str(value if value is not None else '')[:20_000]
+        params[str(key)[:80]] = value
+    return params
+
+
+def _clean_branches(node, raw, seen, depth):
+    """An If always has its two branches; a Switch has its cases and then Otherwise."""
+    given = [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
+    inner = lambda b: clean_steps(b.get('steps'), seen, depth + 1)  # noqa: E731
+    if node == 'if':
+        by_id = {b.get('id'): b for b in given}
+        return [{'id': key, 'steps': inner(by_id.get(key, {}))} for key in ('true', 'false')]
+    branches, ids = [], set()
+    for branch in given:
+        key = str(branch.get('id', ''))
+        if key == 'default' or not UID.match(key) or key in ids or len(branches) >= 12:
+            continue
+        ids.add(key)
+        op = branch.get('op') if branch.get('op') in dict(MAP_OPS) else 'eq'
+        branches.append({'id': key, 'op': op, 'value': str(branch.get('value', ''))[:500],
+                         'value2': str(branch.get('value2', ''))[:500], 'label': str(branch.get('label', ''))[:60],
+                         'steps': inner(branch)})
+    default = next((b for b in given if b.get('id') == 'default'), {})
+    return branches + [{'id': 'default', 'steps': inner(default)}]
+
+
+def clean_steps(raw, seen=None, depth=0):
+    """Steps from the browser, keeping only what a step may hold. Walks into branches."""
+    seen = set() if seen is None else seen
+    steps = []
     for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or len(seen) >= 80:
             continue
         uid, node = str(item.get('uid', '')), item.get('node')
         if not UID.match(uid) or uid in seen or uid == 'secret' or node not in KNOWN:
             continue
+        if node in nodes.BRANCHING and depth >= nodes.MAX_DEPTH:
+            continue
         seen.add(uid)
-        params = {}
-        for key, value in (item.get('params') or {}).items() if isinstance(item.get('params'), dict) else []:
-            if isinstance(value, dict) and isinstance(value.get('map'), dict):
-                spec = value['map']
-                value = {'map': {
-                    'on': str(spec.get('on', ''))[:500],
-                    'rules': [{k: str(rule.get(k, ''))[:500] for k in ('op', 'value', 'value2', 'then')}
-                              for rule in spec.get('rules') or [] if isinstance(rule, dict)][:30],
-                    'else': str(spec.get('else', ''))[:500],
-                }}
-            elif isinstance(value, bool):
-                value = 'true' if value else 'false'
-            else:
-                value = str(value if value is not None else '')[:20_000]
-            params[str(key)[:80]] = value
         connection = item.get('connection') if node in ('event', 'action') else None
-        steps.append({'uid': uid, 'node': node, 'connection': connection if isinstance(connection, int) else None,
-                      'key': str(item.get('key') or '')[:120] if node in ('event', 'action') else '', 'params': params})
-    return steps[:40]
+        step = {'uid': uid, 'node': node, 'connection': connection if isinstance(connection, int) else None,
+                'key': str(item.get('key') or '')[:120] if node in ('event', 'action') else '',
+                'params': _clean_params(item.get('params'))}
+        if node in nodes.BRANCHING:
+            step['branches'] = _clean_branches(node, item.get('branches'), seen, depth)
+        steps.append(step)
+    return steps
 
 
 def _connections():
@@ -84,7 +116,7 @@ def _apply(workflow, body, connections):
     if 'steps' in body:
         workflow.steps = clean_steps(body['steps'])
         workflow.samples = {uid: sample for uid, sample in workflow.samples.items()
-                            if any(step['uid'] == uid for step in workflow.steps)}
+                            if nodes.find(workflow.steps, uid)}
     found = nodes.problems(workflow.steps, connections)
     paused = False
     if workflow.enabled and found:
@@ -107,7 +139,7 @@ def builder(request, pk):
         for building in catalog[side]['buildings']:
             for definition in building['items']:
                 defs[definition['id']] = definition
-    missing = {step['uid']: d for step in workflow.steps
+    missing = {step['uid']: d for step in nodes.walk(workflow.steps)
                for d in [nodes.describe(step, by_id)] if d.get('missing')}
     hook = request.build_absolute_uri(reverse('workflow_hook', args=[workflow.hook_token]))
     data = {
@@ -150,10 +182,10 @@ def workflow_toggle(request, workflow, body):
     return JsonResponse({'ok': True, 'enabled': want, 'problems': []})
 
 
-def _sample_context(workflow, steps, upto, connections):
-    """What the steps before `upto` would give: their last test, else sample data."""
+def _sample_context(workflow, earlier, connections):
+    """What the steps before this one would give: their last test, else sample data."""
     ctx = {}
-    for index, step in enumerate(steps[:upto]):
+    for index, step in enumerate(earlier):
         sample = workflow.samples.get(step['uid'])
         if not isinstance(sample, dict):
             definition = nodes.describe(step, connections)
@@ -167,21 +199,23 @@ def workflow_test_step(request, workflow, body):
     """Run one step for real, feeding it the earlier steps' sample data."""
     connections = _connections()
     steps = clean_steps(body.get('steps'))
-    index = next((i for i, step in enumerate(steps) if step['uid'] == body.get('uid')), None)
-    if index is None:
+    step = nodes.find(steps, body.get('uid'))
+    if step is None:
         return JsonResponse({'error': "That step isn't in the workflow any more."}, status=400)
-    step, definition = steps[index], nodes.describe(steps[index], connections)
+    definition = nodes.describe(step, connections)
     began = time.monotonic()
-    if index == 0:
+    if steps and steps[0] is step:
         output, real = engine.trigger_sample(workflow, step, definition)
         result = {'ok': True, 'output': output, 'real': real}
     else:
-        ctx = _sample_context(workflow, steps, index, connections)
+        ctx = _sample_context(workflow, nodes.before(steps, step['uid']), connections)
         secrets_ = {s.name: s.value for s in Secret.objects.all()}
         try:
-            output, _sent, _note, _tries = engine.perform_with_retries(
+            output, _sent, note, _tries = engine.perform_with_retries(
                 step, definition, ctx, connections, secrets_, uuid.uuid4().hex, waits=[])
             result = {'ok': True, 'output': output, 'real': True}
+            if step['node'] in nodes.BRANCHING:
+                result['took'] = note
         except engine.Stop:
             output = {'passed': False}
             result = {'ok': True, 'output': output, 'real': True, 'stopped': True}
@@ -216,7 +250,7 @@ def workflow_test(request, workflow, body):
         'steps': [{'uid': step['uid'], 'status': results[step['uid']].status if step['uid'] in results else 'skipped',
                    'error': results[step['uid']].error if step['uid'] in results else '',
                    'output': results[step['uid']].output if step['uid'] in results else None}
-                  for step in run.steps],
+                  for step in nodes.walk(run.steps)],
     })
 
 

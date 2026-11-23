@@ -9,14 +9,14 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from .. import buildings
+from .. import buildings, nodes
 from ..buildings import BuildingError
 from ..models import Connection, Event, Settings, Workflow
 from .account import remember_address
 
 
 def _uses(connection, workflows):
-    return [w for w in workflows if any(step.get('connection') == connection.id for step in w.steps)]
+    return [w for w in workflows if any(step.get('connection') == connection.id for step in nodes.walk(w.steps))]
 
 
 @login_required

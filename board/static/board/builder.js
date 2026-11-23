@@ -63,7 +63,63 @@
   function touch() { dirty = true; renderHead(); }
 
   // ---------- definitions and sample data ----------
-  var BUILTIN = { manual: 1, schedule: 1, webhook: 1, failure: 1, condition: 1, http: 1 };
+  var BUILTIN = { manual: 1, schedule: 1, webhook: 1, failure: 1, condition: 1, 'if': 1, 'switch': 1, http: 1 };
+  var BRANCHING = { 'if': 1, 'switch': 1 };
+
+  // ---------- the step tree ----------
+  // An If or Switch step holds `branches`, each with its own `steps`.
+  function walk(steps, fn) {
+    (steps || []).forEach(function (step) {
+      fn(step);
+      (step.branches || []).forEach(function (branch) { walk(branch.steps, fn); });
+    });
+  }
+  function allSteps() { var out = []; walk(wf.steps, function (s) { out.push(s); }); return out; }
+  function locate(id, steps) {
+    steps = steps || wf.steps;
+    for (var i = 0; i < steps.length; i++) {
+      if (steps[i].uid === id) return { list: steps, index: i, step: steps[i] };
+      var branches = steps[i].branches || [];
+      for (var b = 0; b < branches.length; b++) {
+        var found = locate(id, branches[b].steps);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+  // The steps whose fields `id` can use: not the ones in a sibling branch, which never run with it.
+  function before(id) {
+    function search(items, seen) {
+      for (var i = 0; i < items.length; i++) {
+        var step = items[i];
+        if (step.uid === id) return seen;
+        var mine = seen.concat([step]), branches = step.branches || [];
+        for (var b = 0; b < branches.length; b++) {
+          var found = search(branches[b].steps, mine);
+          if (found) return found;
+        }
+        var inside = []; walk([step], function (s) { inside.push(s); });
+        seen = seen.concat(inside);
+      }
+      return null;
+    }
+    return search(wf.steps, []) || [];
+  }
+  function newBranches(node) {
+    if (node === 'if') return [{ id: 'true', steps: [] }, { id: 'false', steps: [] }];
+    if (node === 'switch') return [newCase(), { id: 'default', steps: [] }];
+    return undefined;
+  }
+  function newCase() { return { id: 'c' + Math.random().toString(16).slice(2, 8), op: 'eq', value: '', value2: '', label: '', steps: [] }; }
+  function branchLabel(step, branch) {
+    if (step.node === 'if') return branch.id === 'true' ? 'True' : 'False';
+    if (branch.id === 'default') return 'Otherwise';
+    if (branch.label) return branch.label;
+    var op = data.mapOps.filter(function (o) { return o.value === branch.op; })[0];
+    var words = op ? op.label : 'is';
+    if (branch.op === 'between') return words + ' ' + (branch.value || '…') + ' and ' + (branch.value2 || '…');
+    return words + ' ' + (branch.value || '…');
+  }
   function defOf(step) {
     var id = BUILTIN[step.node] ? step.node : step.node + ':' + step.connection + ':' + step.key;
     return data.defs[id] || data.missing[step.uid] || {
@@ -159,17 +215,17 @@
   });
   testBtn.addEventListener('click', function () {
     if (busy || !wf.steps.length) return;
-    var hasAction = wf.steps.some(function (s) { return s.node === 'action' && !defOf(s).lookup || s.node === 'http'; });
+    var hasAction = allSteps().some(function (s) { return s.node === 'action' && !defOf(s).lookup || s.node === 'http'; });
     if (hasAction && !window.confirm('Testing really runs every step with sample data, so actions happen for real. Go ahead?')) return;
     busy = true; results = {};
-    wf.steps.forEach(function (s) { results[s.uid] = { status: 'running' }; });
+    allSteps().forEach(function (s) { results[s.uid] = { status: 'running' }; });
     renderHead(); renderFlow();
     post(data.urls.test, payload()).then(function (answer) {
       busy = false; dirty = false;
       if (!answer.steps) { results = {}; renderHead(); renderFlow(); toast(answer.error || 'The test could not start.', true); return; }
       answer.steps.forEach(function (s, i) {
         setTimeout(function () {
-          results[s.uid] = s.status === 'skipped' ? undefined : { status: s.status, error: s.error, output: s.output, real: true };
+          results[s.uid] = s.status === 'skipped' ? undefined : { status: s.status, error: s.error, output: s.output, real: true, stopped: s.status === 'stopped' };
           if (s.output && typeof s.output === 'object') samples[s.uid] = s.output;
           renderFlow();
         }, 180 * i);
@@ -184,7 +240,7 @@
   // ---------- canvas ----------
   function renderFlow() {
     flow.textContent = '';
-    flow.style.transform = 'translate(' + view.x + 'px, ' + view.y + 'px) scale(' + view.zoom + ')';
+    flow.style.transform = 'translate(calc(-50% + ' + view.x + 'px), ' + view.y + 'px) scale(' + view.zoom + ')';
     canvas.style.backgroundPosition = view.x + 'px ' + view.y + 'px';
     $('zoom-label').textContent = Math.round(view.zoom * 100) + '%';
     $('tip').hidden = !wf.steps.length;
@@ -200,15 +256,28 @@
         onclick: function () { openPicker('trigger', 0); } }, icon('bolt')));
       flow.appendChild(h('div', { class: 'wire' }));
     }
-    wf.steps.forEach(function (step, index) {
+    renderList(wf.steps, flow, true);
+  }
+
+  // One column of steps. Top level ends on a big plus; a branch ends on a wire that
+  // stretches down to where the branches join again.
+  function renderList(list, into, top) {
+    var plus = function (at, label, end) {
+      return h('button', { type: 'button', class: 'plus' + (end ? ' end' : ''), 'aria-label': label,
+        onclick: function () { openPicker('step', at, list); } }, icon('add'));
+    };
+    if (!top && !list.length) {
+      into.appendChild(plus(0, 'Add a step to this branch'));
+      into.appendChild(h('div', { class: 'wire grow' }));
+      return;
+    }
+    list.forEach(function (step, index) {
       var def = defOf(step), result = results[step.uid];
       var node = h('button', {
         type: 'button', class: 'node' + (editing === step.uid ? ' open' : '') + (def.missing ? ' bad' : ''),
         onclick: function () { openEditor(step.uid); }
       });
-      if (index === 0) {
-        node.appendChild(h('div', { class: 'node-bar' }, icon('bolt', 'fill'), 'Trigger'));
-      }
+      if (top && index === 0) node.appendChild(h('div', { class: 'node-bar' }, icon('bolt', 'fill'), 'Trigger'));
       var state = null;
       if (result && result.status) {
         var look = { running: ['progress_activity', 'spin is-running'], ok: ['check_circle', 'fill is-ok'],
@@ -223,17 +292,32 @@
         tokensIn((step.params || {})[p.key]).forEach(function (t) { if (chips.length < 3 && t[0] !== 'secret' && chips.indexOf(t[1]) < 0) chips.push(t[1]); });
       });
       if (chips.length) node.appendChild(h('div', { class: 'node-chips' }, chips.map(function (c) { return h('span', { text: c }); })));
-      flow.appendChild(node);
-      flow.appendChild(h('div', { class: 'wire' }));
-      var last = index === wf.steps.length - 1;
-      flow.appendChild(h('button', {
-        type: 'button', class: 'plus' + (last ? ' end' : ''), 'aria-label': 'Add a step after ' + def.title,
-        onclick: function () { openPicker('step', index + 1); }
-      }, icon('add')));
-      if (!last) flow.appendChild(h('div', { class: 'wire' }));
+      into.appendChild(node);
+      into.appendChild(h('div', { class: 'wire' }));
+      if (BRANCHING[step.node]) {
+        var took = result && result.output ? result.output.branch : null;
+        var fork = h('div', { class: 'fork' });
+        (step.branches || []).forEach(function (branch) {
+          var column = h('div', { class: 'branch' + (took === branch.id ? ' taken' : '') },
+            h('div', { class: 'wire' }),
+            h('span', { class: 'branch-label' + (branch.id === 'false' || branch.id === 'default' ? ' quiet' : ''), text: branchLabel(step, branch) }),
+            h('div', { class: 'wire' }));
+          renderList(branch.steps, column, false);
+          fork.appendChild(column);
+        });
+        into.appendChild(fork);
+        into.appendChild(h('div', { class: 'wire' }));
+      }
+      var last = index === list.length - 1;
+      into.appendChild(plus(index + 1, 'Add a step after ' + def.title, top && last));
+      if (!last) into.appendChild(h('div', { class: 'wire' }));
+      else if (!top) into.appendChild(h('div', { class: 'wire grow' }));
     });
   }
   function summary(step, def) {
+    if (step.node === 'if') return 'Goes down True or False, then carries on below.';
+    if (step.node === 'switch') return 'Takes the first case that matches, then carries on below.';
+    if (step.node === 'condition') return 'Stops the workflow here unless the condition is true.';
     if (step.node === 'schedule') {
       var p = step.params || {}, at = p.time || '08:00', days = { mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday', sun: 'Sunday' };
       if (p.repeat === 'hour') return 'Starts every hour at :' + at.split(':')[1] + '.';
@@ -264,7 +348,7 @@
   function applyView() {
     var limit = Math.max(flow.offsetHeight * view.zoom - 200, 0);
     view.y = Math.min(Math.max(view.y, -limit), 200);
-    flow.style.transform = 'translate(' + view.x + 'px, ' + view.y + 'px) scale(' + view.zoom + ')';
+    flow.style.transform = 'translate(calc(-50% + ' + view.x + 'px), ' + view.y + 'px) scale(' + view.zoom + ')';
     canvas.style.backgroundPosition = view.x + 'px ' + view.y + 'px';
   }
   function setZoom(z) { view.zoom = Math.min(1.6, Math.max(0.5, Math.round(z * 10) / 10)); $('zoom-label').textContent = Math.round(view.zoom * 100) + '%'; applyView(); }
@@ -273,11 +357,11 @@
   $('zoom-fit').addEventListener('click', function () { view = { x: 0, y: 0, zoom: 1 }; renderFlow(); });
 
   // ---------- picker ----------
-  function openPicker(mode, at) {
+  function openPicker(mode, at, list) {
     closeEditor();
     var side = data.catalog[mode === 'trigger' ? 'triggers' : 'steps'];
     var first = side.buildings.filter(function (b) { return b.items.length; })[0];
-    picker = { mode: mode, at: at, query: '', open: first ? first.connection : null };
+    picker = { mode: mode, at: at, list: list || wf.steps, query: '', open: first ? first.connection : null };
     renderPicker();
     var search = pickerEl.querySelector('input'); if (search) search.focus();
   }
@@ -286,8 +370,9 @@
     var params = {};
     (def.params || []).forEach(function (p) { if (p['default'] !== undefined) params[p.key] = String(p['default']); });
     var step = { uid: uid(), node: def.node, connection: def.connection, key: def.key || '', params: params };
+    if (BRANCHING[def.node]) step.branches = newBranches(def.node);
     if (picker.mode === 'trigger' && wf.steps.length && defOf(wf.steps[0]).trigger) wf.steps[0] = step;
-    else wf.steps.splice(picker.at, 0, step);
+    else picker.list.splice(picker.at, 0, step);
     closePicker(); touch(); renderFlow(); openEditor(step.uid);
   }
   function renderPicker() {
@@ -354,7 +439,7 @@
     if (editing) closeEditor(); else if (picker) closePicker();
   });
 
-  function stepByUid(id) { return wf.steps.filter(function (s) { return s.uid === id; })[0]; }
+  function stepByUid(id) { var found = locate(id); return found ? found.step : undefined; }
 
   function tokenChip(src, key) {
     var chip = h('span', { class: 'token', contenteditable: 'false', 'data-token': '{{' + src + '.' + key + '}}' });
@@ -469,10 +554,12 @@
   }
 
   function renderEditor() {
-    var index = -1;
-    wf.steps.forEach(function (s, i) { if (s.uid === editing) index = i; });
-    if (index < 0) { closeEditor(); return; }
-    var step = wf.steps[index], def = defOf(step), isTrigger = index === 0 && def.trigger;
+    var where = locate(editing);
+    if (!where) { closeEditor(); return; }
+    var everything = allSteps();
+    var step = where.step, def = defOf(step);
+    // `index` only tells the first step (0) from the rest, as the panes below expect.
+    var index = where.list === wf.steps && where.index === 0 ? 0 : 1, isTrigger = index === 0 && def.trigger;
     step.params = step.params || {};
     veil.hidden = false; veil.textContent = '';
 
@@ -484,7 +571,7 @@
     } else {
       inPane.appendChild(h('p', null, icon('drag_pan'), 'Drag a field into a setting, or click it to add it where your cursor is'));
       var groups = h('div', { class: 'groups' });
-      wf.steps.slice(0, index).forEach(function (prev) {
+      before(step.uid).forEach(function (prev) {
         var pdef = defOf(prev), info = fieldsOf(prev);
         groups.appendChild(h('div', { class: 'group' },
           h('div', { class: 'group-head' }, tile(pdef.tile, 's'), h('span', { text: pdef.title }), info.real ? null : h('small', { text: 'sample data' })),
@@ -519,6 +606,10 @@
         : 'Nothing to set up here. Press Test to see what this step sends to the next one.' }));
     }
     shown.forEach(function (p) { params.appendChild(paramControl(step, def, p, index)); });
+    if (step.node === 'switch') params.appendChild(casesControl(step));
+    if (step.node === 'if') {
+      params.appendChild(h('span', { class: 'help', text: 'Add the steps for each way on the canvas, under True and False. Steps below the If run after either one.' }));
+    }
     if (step.node === 'action' || step.node === 'http') {
       params.appendChild(h('span', { class: 'help', text: 'If this step fails with a network error or a server error it is tried 3 times, then the run stops and is marked failed. You can retry it from Runs.' }));
     }
@@ -532,13 +623,41 @@
     veil.appendChild(h('section', { class: 'editor', role: 'dialog', 'aria-label': def.title },
       h('header', null, tile(def.tile, 'l'),
         h('div', { class: 'titles' },
-          h('span', { text: (isTrigger ? 'Trigger · ' : '') + def.kind + ' · step ' + (index + 1) + ' of ' + wf.steps.length }),
+          h('span', { text: (isTrigger ? 'Trigger · ' : '') + def.kind + ' · step ' + (everything.indexOf(step) + 1) + ' of ' + everything.length }),
           h('h2', { text: def.title })),
         isTrigger ? h('button', { type: 'button', class: 'btn', onclick: function () { openPicker('trigger', 0); } }, icon('swap_horiz'), 'Change trigger') : null,
         h('button', { type: 'button', class: 'btn danger', onclick: function () { removeStep(step); } }, icon('delete'), 'Remove step'),
         def.missing ? null : testOne,
         h('button', { type: 'button', class: 'x', 'aria-label': 'Close', onclick: closeEditor }, icon('close'))),
       h('div', { class: 'panes' }, inPane, mid, out)));
+  }
+
+  // A Switch's cases: each is a comparison with the field above, and gets its own branch.
+  function casesControl(step) {
+    var rerender = function () { touch(); renderEditor(); renderFlow(); };
+    var box = h('div', { class: 'table' });
+    var cases = step.branches.filter(function (b) { return b.id !== 'default'; });
+    cases.forEach(function (branch, i) {
+      var op = h('select', { 'aria-label': 'Comparison', onchange: function () { branch.op = op.value; rerender(); } },
+        data.mapOps.map(function (o) { return h('option', { value: o.value, text: o.label, selected: o.value === branch.op }); }));
+      var first = h('input', { type: 'text', value: branch.value || '', 'aria-label': 'Value', placeholder: 'value',
+        oninput: function () { branch.value = first.value; touch(); }, onchange: function () { renderFlow(); } });
+      var second = branch.op === 'between' ? h('input', { type: 'text', value: branch.value2 || '', 'aria-label': 'Upper value',
+        oninput: function () { branch.value2 = second.value; touch(); }, onchange: function () { renderFlow(); } }) : null;
+      var name = h('input', { type: 'text', class: 'name', value: branch.label || '', 'aria-label': 'Name for this case', placeholder: 'Name (optional)',
+        maxlength: '60', oninput: function () { branch.label = name.value; touch(); }, onchange: function () { renderFlow(); } });
+      box.appendChild(h('div', { class: 'rule' }, 'Case ' + (i + 1) + ': it', op, first, second ? 'and' : null, second, name,
+        h('button', { type: 'button', class: 'x', 'aria-label': 'Remove case ' + (i + 1), disabled: cases.length < 2, onclick: function () {
+          if (branch.steps.length && !window.confirm('Remove this case and the ' + branch.steps.length + ' step(s) in its branch?')) return;
+          step.branches.splice(step.branches.indexOf(branch), 1); rerender();
+        } }, icon('close'))));
+    });
+    box.appendChild(h('div', { class: 'table-foot rule' },
+      h('button', { type: 'button', class: 'btn small', disabled: cases.length >= 12, onclick: function () {
+        step.branches.splice(step.branches.length - 1, 0, newCase()); rerender();
+      } }, icon('add'), 'Add a case'),
+      h('span', { class: 'grow' }), h('span', { class: 'help', text: 'The first case that matches wins. None matching takes Otherwise.' })));
+    return h('div', { class: 'param' }, h('div', { class: 'param-label' }, h('span', { class: 'name', text: 'Cases' })), box);
   }
 
   function paramControl(step, def, param, index) {
@@ -630,7 +749,8 @@
         def.missing ? null : h('button', { type: 'button', class: 'btn', onclick: function () { testStep(step); } }, 'Test this step')));
       return;
     }
-    if (result && result.stopped) head.appendChild(h('span', { class: 'pill stop' }, icon('do_not_disturb_on', 'fill'), "Check didn't pass"));
+    if (result && result.took) head.appendChild(h('span', { class: 'pill' }, icon('call_split'), 'Took ' + result.took));
+    else if (result && result.stopped) head.appendChild(h('span', { class: 'pill stop' }, icon('do_not_disturb_on', 'fill'), "Check didn't pass"));
     else if (result) head.appendChild(h('span', { class: 'pill' }, icon('check_circle', 'fill'), 'Worked' + (result.ms != null ? ' · ' + result.ms + ' ms' : '')));
     out.appendChild(h('p', { class: 'out-note', text: result
       ? (index === 0 && result.real === false ? 'Sample data. Real data shows here once this trigger has fired.' : 'From the test you just ran')
@@ -656,7 +776,7 @@
     renderEditor(); renderFlow();
     post(data.urls.test_step, { steps: wf.steps, uid: step.uid }).then(function (answer) {
       if (answer.ok) {
-        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped };
+        results[step.uid] = { status: answer.stopped ? 'stopped' : 'ok', output: answer.output, ms: answer.ms, real: answer.real, stopped: answer.stopped, took: answer.took };
         samples[step.uid] = answer.output;
       } else results[step.uid] = { status: 'failed', error: answer.error || 'This step failed.' };
       if (editing === step.uid) renderEditor();
@@ -665,10 +785,15 @@
   }
 
   function removeStep(step) {
-    var index = wf.steps.indexOf(step);
-    if (index === 0 && wf.steps.length > 1 && !window.confirm('Remove the trigger? The other steps stay, but the workflow can’t run until you add a new one.')) return;
-    wf.steps.splice(index, 1);
-    delete results[step.uid]; delete samples[step.uid];
+    var where = locate(step.uid);
+    if (!where) return;
+    var inside = 0;
+    walk([step], function () { inside++; });
+    var first = where.list === wf.steps && where.index === 0;
+    if (first && wf.steps.length > 1 && !window.confirm('Remove the trigger? The other steps stay, but the workflow can’t run until you add a new one.')) return;
+    if (inside > 1 && !window.confirm('Remove this ' + defOf(step).title + ' and the ' + (inside - 1) + ' step(s) in its branches?')) return;
+    where.list.splice(where.index, 1);
+    walk([step], function (s) { delete results[s.uid]; delete samples[s.uid]; });
     editing = null; veil.hidden = true; veil.textContent = '';
     touch(); renderFlow(); toast('Step removed');
     if (!wf.steps.length || !defOf(wf.steps[0]).trigger) {

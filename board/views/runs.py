@@ -32,29 +32,48 @@ def _pretty(value):
 
 
 def _detail(run):
-    """The selected run's steps: what ran, what stopped it, what never got a turn."""
+    """The selected run's steps along the path it took: what ran, what stopped it, and what
+    never got a turn. Branches that weren't taken are left out."""
     connections = {c.id: c for c in Connection.objects.all()}
-    results = {r.index: r for r in run.step_results.all()}
+    results = {r.uid: r for r in run.step_results.all()}
+    waiting = run.status in (Run.QUEUED, Run.RUNNING)
     steps = []
-    for index, step in enumerate(run.steps):
-        result = results.get(index)
-        definition = nodes.describe(step, connections)
-        if result is None:
-            waiting = run.status in (Run.QUEUED, Run.RUNNING)
-            steps.append({'title': definition['title'], 'status': 'waiting' if waiting else 'skipped',
-                          'note': 'Waiting' if waiting else 'Skipped', 'tile': definition['tile']})
-            continue
-        note = result.note
-        if result.status == RunStep.OK and index > 0:
-            note = f'{definition["kind"]} · {took(result.duration_ms)}'
-            if result.tries > 1:
-                note += f' · took {result.tries} tries'
-        steps.append({
-            'title': result.title, 'status': result.status, 'note': note, 'error': result.error,
-            'tile': definition['tile'], 'sent': _pretty(result.sent), 'output': _pretty(result.output),
-        })
+
+    def add(items, depth, reached):
+        for position, step in enumerate(items):
+            result = results.get(step['uid'])
+            definition = nodes.describe(step, connections)
+            first = depth == 0 and position == 0
+            row = {'title': definition['title'], 'tile': definition['tile'], 'depth': depth, 'first': first}
+            if result is None:
+                row.update(status='waiting' if waiting else 'skipped', note='Waiting' if waiting else 'Skipped')
+                steps.append(row)
+                reached = False
+                continue    # an If or Switch that never ran took no branch, so nothing of it to show
+            note = result.note
+            if result.status == RunStep.OK and not first:
+                note = f'{definition["kind"]} · {took(result.duration_ms)}'
+                if step.get('node') in nodes.BRANCHING:
+                    note = f'Took the {result.note} branch'
+                if result.tries > 1:
+                    note += f' · took {result.tries} tries'
+            row.update(title=result.title, status=result.status, note=note, error=result.error,
+                       sent=_pretty(result.sent), output=_pretty(result.output))
+            steps.append(row)
+            if result.status != RunStep.OK:
+                reached = False
+            if step.get('node') in nodes.BRANCHING and result.status == RunStep.OK:
+                taken = (result.output or {}).get('branch')
+                chosen = next((b for b in step.get('branches') or [] if b['id'] == taken), None)
+                if chosen and chosen.get('steps'):
+                    reached = add(chosen['steps'], depth + 1, reached)
+        return reached
+
+    add(run.steps, 0, True)
+    failed = nodes.find(run.steps, run.failed_uid) if run.failed_uid else None
     return {'run': run, 'steps': steps, 'icon': LOOK[run.status][0], 'label': LOOK[run.status][1],
-            'took': took(run.duration_ms), 'retry_step': (run.failed_step or 0) + 1}
+            'took': took(run.duration_ms),
+            'retry_from': nodes.describe(failed, connections)['title'] if failed else ''}
 
 
 @login_required

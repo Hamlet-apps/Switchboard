@@ -231,7 +231,7 @@ class EngineTests(Base):
         self.assertEqual(run.status, Run.FAILED)
         self.assertEqual(len(self.world.to(find)), 3)
         self.assertIn('503 · Down for a moment. (after 3 tries)', run.error)
-        self.assertEqual(run.failed_step, 1)
+        self.assertEqual(run.failed_uid, workflow.steps[1]['uid'])
 
         self.world.calls.clear()
         self.world.on('POST', find, (422, {'error': {'code': 'invalid_params', 'message': 'Email is missing.'}}))
@@ -253,7 +253,7 @@ class EngineTests(Base):
         self.world.on('POST', issue, (500, {'error': {'code': 'server_error', 'message': 'Oops.'}}))
         self.deliver(self.th, self.level_event())
         run = workflow.runs.get()
-        self.assertEqual((run.status, run.failed_step), (Run.FAILED, 3))
+        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, workflow.steps[3]['uid']))
         first_key = self.world.to(issue)[0]['headers']['Idempotency-Key']
         finds = len(self.world.to('https://pv.test/switchboard/v1/actions/staff.find'))
 
@@ -330,6 +330,189 @@ class EngineTests(Base):
         self.assertEqual(workflow.runs.get().status, Run.SUCCEEDED)
         self.assertEqual(self.world.to('https://pv.test/switchboard/v1/actions/shift.add')[0]['json'],
                          {'staff_id': '5', 'starts_at': '2026-11-28T09:00:00-08:00', 'ends_at': '2026-11-28T12:00:00-08:00'})
+
+
+class BranchTests(Base):
+    """If and Switch: one branch runs, then whatever comes after them."""
+
+    find = 'https://pv.test/switchboard/v1/actions/staff.find'
+    issue = 'https://pv.test/switchboard/v1/actions/staff_card.issue'
+    ensure = 'https://pv.test/switchboard/v1/actions/staff.ensure'
+
+    def card(self, uid, amount):
+        return {'uid': uid, 'node': 'action', 'connection': self.pv.id, 'key': 'staff_card.issue',
+                'params': {'staff_id': '{{f.staff_id}}', 'amount': amount}}
+
+    def if_workflow(self):
+        return Workflow.objects.create(name='Card or sign up', enabled=True, steps=[
+            {'uid': 't', 'node': 'event', 'connection': self.th.id, 'key': 'volunteer.level_reached', 'params': {}},
+            {'uid': 'f', 'node': 'action', 'connection': self.pv.id, 'key': 'staff.find',
+             'params': {'email': '{{t.person.email}}'}},
+            {'uid': 'i', 'node': 'if', 'params': {'left': '{{f.found}}', 'op': 'true'}, 'branches': [
+                {'id': 'true', 'steps': [self.card('c', '10')]},
+                {'id': 'false', 'steps': [
+                    {'uid': 'e', 'node': 'action', 'connection': self.pv.id, 'key': 'staff.ensure',
+                     'params': {'name': '{{t.person.name}}', 'email': '{{t.person.email}}'}}]},
+            ]},
+            {'uid': 'after', 'node': 'http', 'params': {'method': 'POST', 'url': 'https://chat.test/send',
+                                                         'body': 'Went {{i.branch}} for {{t.person.name}}'}},
+        ])
+
+    def test_if_takes_the_true_branch_then_carries_on(self):
+        workflow = self.if_workflow()
+        self.world.on('POST', self.find, (200, {'found': True, 'staff_id': '12'}))
+        self.world.on('POST', self.issue, (200, {'card_id': '7'}))
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+        self.deliver(self.th, self.level_event())
+        run = workflow.runs.get()
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'f', 'i', 'c', 'after'])
+        self.assertEqual(run.context['i'], {'result': True, 'branch': 'true'})
+        self.assertEqual(self.world.to(self.ensure), [])
+        self.assertEqual(self.world.to('https://chat.test/send')[0]['raw'], 'Went true for Maria K.')
+
+    def test_if_takes_the_false_branch(self):
+        workflow = self.if_workflow()
+        self.world.on('POST', self.find, (200, {'found': False}))
+        self.world.on('POST', self.ensure, (200, {'staff_id': '30', 'created': True}))
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+        self.deliver(self.th, self.level_event())
+        run = workflow.runs.get()
+        self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'f', 'i', 'e', 'after'])
+        self.assertEqual(self.world.to(self.issue), [])
+        page = self.client.get(reverse('runs'))
+        self.assertContains(page, 'Took the False branch')
+        self.assertContains(page, 'Add staff member')
+        self.assertNotContains(page, 'Issue staff card')   # the branch not taken isn't listed
+
+    def test_retry_inside_a_branch_keeps_the_decision_and_repeats_nothing(self):
+        workflow = self.if_workflow()
+        self.world.on('POST', self.find, (200, {'found': True, 'staff_id': '12'}))
+        self.world.on('POST', self.issue, (500, {'error': {'code': 'server_error', 'message': 'Oops.'}}))
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+        self.deliver(self.th, self.level_event())
+        run = workflow.runs.get()
+        self.assertEqual((run.status, run.failed_uid), (Run.FAILED, 'c'))
+        self.assertContains(self.client.get(reverse('runs')), 'Retry from “Issue staff card”')
+        key = self.world.to(self.issue)[0]['headers']['Idempotency-Key']
+        # Even if Pavilion would now say "not found", the If already went True.
+        self.world.on('POST', self.find, (200, {'found': False}))
+        self.world.on('POST', self.issue, (200, {'card_id': '7'}))
+        self.client.post(reverse('run_retry', args=[run.pk]))
+        run.refresh_from_db()
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual(len(self.world.to(self.find)), 1)
+        self.assertEqual(self.world.to(self.issue)[-1]['headers']['Idempotency-Key'], key)
+        self.assertEqual([s.uid for s in run.step_results.all()], ['t', 'f', 'i', 'c', 'after'])
+        self.assertEqual(self.world.to(self.ensure), [])
+
+    def switch_workflow(self):
+        case = lambda cid, op, value, amount, **more: {  # noqa: E731
+            'id': cid, 'op': op, 'value': value, 'value2': more.get('value2', ''), 'label': more.get('label', ''),
+            'steps': [self.card('k' + cid, amount)]}
+        return Workflow.objects.create(name='Card by level', enabled=True, steps=[
+            {'uid': 't', 'node': 'event', 'connection': self.th.id, 'key': 'volunteer.level_reached', 'params': {}},
+            {'uid': 'f', 'node': 'action', 'connection': self.pv.id, 'key': 'staff.find',
+             'params': {'email': '{{t.person.email}}'}},
+            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.level}}'}, 'branches': [
+                case('a', 'lte', '2', '5'), case('b', 'eq', '3', '10', label='Level three'),
+                case('c', 'between', '4', '15', value2='6'),
+                {'id': 'default', 'steps': []},
+            ]},
+        ])
+
+    def test_switch_takes_the_first_matching_case_or_otherwise(self):
+        workflow = self.switch_workflow()
+        self.world.on('POST', self.find, (200, {'found': True, 'staff_id': '12'}))
+        self.world.on('POST', self.issue, (200, {'card_id': '7'}))
+        for level, amount, case in ((1, 5.0, 'is at most 2'), (3, 10.0, 'Level three'), (5, 15.0, 'is between 4 and 6')):
+            self.deliver(self.th, self.level_event(level=level, event_id=f'evt_{level}'))
+            run = workflow.runs.first()
+            self.assertEqual(self.world.to(self.issue)[-1]['json']['amount'], amount)
+            self.assertEqual(run.context['s']['case'], case)
+        issued = len(self.world.to(self.issue))
+        self.deliver(self.th, self.level_event(level=9, event_id='evt_9'))
+        run = workflow.runs.first()
+        self.assertEqual(run.status, Run.SUCCEEDED)
+        self.assertEqual(run.context['s'], {'matched': False, 'branch': 'default', 'case': 'Otherwise'})
+        self.assertEqual(len(self.world.to(self.issue)), issued)
+
+    def test_filter_inside_a_branch_stops_the_whole_run(self):
+        workflow = self.if_workflow()
+        steps = workflow.steps
+        steps[2]['branches'][0]['steps'].insert(0, {'uid': 'g', 'node': 'condition',
+                                                    'params': {'left': '{{t.level}}', 'op': 'gte', 'right': '4'}})
+        workflow.steps = steps
+        workflow.save()
+        self.world.on('POST', self.find, (200, {'found': True, 'staff_id': '12'}))
+        self.deliver(self.th, self.level_event(level=3))
+        run = workflow.runs.get()
+        self.assertEqual(run.status, Run.STOPPED)
+        self.assertEqual(self.world.to('https://chat.test/send'), [])
+
+    def test_helpers_know_the_tree(self):
+        steps = self.if_workflow().steps
+        self.assertEqual([s['uid'] for s in nodes.walk(steps)], ['t', 'f', 'i', 'c', 'e', 'after'])
+        self.assertEqual([s['uid'] for s in nodes.before(steps, 'e')], ['t', 'f', 'i'])       # not its sibling branch
+        self.assertEqual([s['uid'] for s in nodes.before(steps, 'after')], ['t', 'f', 'i', 'c', 'e'])
+        connections = {self.th.id: self.th, self.pv.id: self.pv}
+        self.assertEqual(nodes.problems(steps, connections), [])
+        steps[2]['branches'][1]['steps'][0]['params']['email'] = ''
+        self.assertEqual(nodes.problems(steps, connections), ['"Add staff member" needs email.'])
+        self.assertEqual(nodes.problems(self.switch_workflow().steps[:2] + [
+            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.level}}'}, 'branches': nodes.new_branches('switch')}],
+            connections), ['A Switch case has nothing to compare with.'])
+
+
+class BranchBuilderTests(Base):
+    def post(self, name, workflow, body):
+        return self.client.post(reverse(f'workflow_{name}', args=[workflow.pk]), json.dumps(body),
+                                content_type='application/json')
+
+    def test_save_keeps_branches_and_cleans_them(self):
+        workflow = Workflow.objects.create(name='New')
+        steps = [
+            {'uid': 't', 'node': 'manual', 'params': {}},
+            {'uid': 'i', 'node': 'if', 'params': {'left': '{{t.started_by}}', 'op': 'eq', 'right': 'andrew'},
+             'branches': [{'id': 'false', 'steps': [{'uid': 'x', 'node': 'evil'}]},
+                          {'id': 'bogus', 'steps': [{'uid': 'h9', 'node': 'http', 'params': {'url': 'https://a.test'}}]}]},
+            {'uid': 's', 'node': 'switch', 'params': {'on': '{{t.started_by}}'}, 'branches': [
+                {'id': 'c1', 'op': 'nonsense', 'value': 'andrew', 'steps': [
+                    {'uid': 't', 'node': 'http', 'params': {'url': 'https://dup.test'}},   # a uid used twice
+                    {'uid': 'h1', 'node': 'http', 'params': {'url': 'https://a.test'}}]},
+                {'id': 'c1', 'op': 'eq', 'value': 'again'},
+                {'id': 'default', 'steps': 'not a list'}]},
+        ]
+        answer = self.post('save', workflow, {'steps': steps}).json()
+        self.assertEqual(answer['problems'], [])
+        workflow.refresh_from_db()
+        branch_ids = lambda step: [b['id'] for b in step['branches']]  # noqa: E731
+        self.assertEqual(branch_ids(workflow.steps[1]), ['true', 'false'])
+        self.assertEqual(workflow.steps[1]['branches'][1]['steps'], [])
+        self.assertEqual(branch_ids(workflow.steps[2]), ['c1', 'default'])
+        self.assertEqual(workflow.steps[2]['branches'][0]['op'], 'eq')
+        self.assertEqual([s['uid'] for s in workflow.steps[2]['branches'][0]['steps']], ['h1'])
+        page = self.client.get(reverse('builder', args=[workflow.pk]))
+        self.assertEqual([d['title'] for d in page.context['data']['catalog']['steps']['basics']],
+                         ['Filter', 'If', 'Switch', 'Send an HTTP request'])
+        self.assertContains(self.client.get(reverse('workflows')), '4 steps')
+
+    def test_test_step_on_an_if_and_inside_a_branch(self):
+        workflow = Workflow.objects.create(name='New')
+        steps = [
+            {'uid': 't', 'node': 'manual', 'params': {}},
+            {'uid': 'i', 'node': 'if', 'params': {'left': '{{t.started_by}}', 'op': 'eq', 'right': 'nobody'},
+             'branches': [{'id': 'true', 'steps': []}, {'id': 'false', 'steps': [
+                 {'uid': 'h', 'node': 'http', 'params': {'method': 'POST', 'url': 'https://chat.test/send',
+                                                          'body': '{{i.branch}} {{t.started_by}}'}}]}]},
+        ]
+        answer = self.post('test_step', workflow, {'steps': steps, 'uid': 'i'}).json()
+        self.assertEqual((answer['output'], answer['took']), ({'result': False, 'branch': 'false'}, 'False'))
+        self.world.on('POST', 'https://chat.test/send', (200, {'ok': True}))
+        self.post('test_step', workflow, {'steps': steps, 'uid': 'h'})
+        self.assertEqual(self.world.calls[-1]['raw'], 'false Andrew')
+        whole = self.post('test', workflow, {'steps': steps}).json()
+        self.assertEqual([(s['uid'], s['status']) for s in whole['steps']], [('t', 'ok'), ('i', 'ok'), ('h', 'ok')])
 
 
 class HookTests(Base):

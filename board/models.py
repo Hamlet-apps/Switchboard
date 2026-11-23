@@ -136,7 +136,8 @@ class Workflow(models.Model):
     """A trigger followed by a short chain of steps, kept as JSON in `steps`.
 
     Each step is {"uid", "node", "connection", "key", "params"}; the first one is the
-    trigger. `board/nodes.py` says what every kind of node takes and gives.
+    trigger. If and Switch steps also hold "branches", each with its own list of steps, so
+    the whole thing is a tree. `board/nodes.py` says what every kind of node takes and gives.
     """
 
     name = models.CharField(max_length=120, default='Untitled workflow')
@@ -200,8 +201,8 @@ class Run(models.Model):
     context = models.JSONField(default=dict)
     # With the step's uid this makes the Idempotency-Key, so a retry never does an action twice.
     dedupe = models.CharField(max_length=140, default=new_dedupe)
-    start_at = models.PositiveIntegerField(default=0)
-    failed_step = models.PositiveIntegerField(null=True, blank=True)
+    # The step a failed run stopped at; a retry carries on from it.
+    failed_uid = models.CharField(max_length=24, blank=True, default='')
     error = models.CharField(max_length=500, blank=True, default='')
     retries = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(default=timezone.now, db_index=True)
@@ -236,4 +237,4 @@ class RunStep(models.Model):
 
     class Meta:
         ordering = ['index']
-        constraints = [models.UniqueConstraint(fields=['run', 'index'], name='one_result_per_step')]
+        constraints = [models.UniqueConstraint(fields=['run', 'uid'], name='one_result_per_step')]

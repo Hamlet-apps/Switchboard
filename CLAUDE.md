@@ -29,7 +29,7 @@ One app, `board`.
 | --- | --- |
 | `docs/PROTOCOL.md` | The contract with buildings. Town Hall and Pavilion implement it in their own `switchboard` apps; change it only together with them |
 | `models.py` | `Settings` (singleton, `Settings.load()`), `Secret`, `Folder`, `Connection`, `Workflow` (steps are JSON), `Event`, `Run`, `RunStep` |
-| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition`, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
+| `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
 | `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`), `compare()` for conditions, `coerce()` to a param's type |
 | `buildings.py` | Manifest, handshake, action calls, signature check, and the HTTP step. Every outgoing request goes through `_http` |
 | `engine.py` | `start_run`, `execute` (retries on network errors and 5xx, never 4xx), `retry` (from the failed step), `receive_event`, missed events and replay, "a workflow failed" |
@@ -41,12 +41,19 @@ One app, `board`.
 
 ## How it works
 
+- **Steps are a tree.** `if` and `switch` steps hold `branches` (`[{"id", "steps": [...]}]`: `true`/`false`
+  for If; one per case, `{"id", "op", "value", "value2", "label"}`, then `default` for Switch). One
+  branch runs, then the steps after the If or Switch. `condition` is the Filter node (the name is
+  kept because workflows store it): it stops the whole run. Never loop over `workflow.steps` as if
+  it were flat: use `nodes.walk`, `nodes.find` and `nodes.before` (the steps a step can read from;
+  sibling branches are left out). The builder's `walk`/`locate`/`before` in `builder.js` mirror them.
 - **A step** is `{"uid", "node", "connection", "key", "params"}`; the first step is the trigger.
   A param is text with tokens, or a lookup table. A setting that is exactly one token keeps
   the value's type.
 - **A run** snapshots the workflow's steps and keeps each step's output in `Run.context` by
-  uid. `Run.dedupe` + the step's uid make the `Idempotency-Key`, so a retry (same run, from
-  `failed_step`) never does an action twice. One run per (workflow, event).
+  uid. `Run.dedupe` + the step's uid make the `Idempotency-Key`. A retry is the same run executed
+  again: steps that already have a result are skipped and an If or Switch keeps the branch it
+  took (its output holds `branch`), so nothing is done twice. `Run.failed_uid` is where it stopped. One run per (workflow, event).
 - **Events** arrive at `/hooks/building/<Connection.hook_token>`, signed with the connection's
   webhook secret. They are stored (`Event`) before anything runs; duplicates are dropped by
   (connection, event id). Events for a paused workflow show as missed calls in its builder

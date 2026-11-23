@@ -12,8 +12,10 @@ Free, open source and self-hosted, like the rest of the village.
 
 - **Workflows**: a trigger, then a short chain of steps, top to bottom. Triggers are a
   building's event, a schedule, a private webhook URL, a button, or "a workflow failed".
-  Steps look something up in a building, do something there, check a condition
-  ("only continue if…") or send an HTTP request to anything else.
+  Steps look something up in a building, do something there, or send an HTTP request to
+  anything else. Three logic steps steer a run: **Filter** (only continue if a condition is
+  true), **If** (a True branch and a False branch) and **Switch** (one branch per case, plus
+  Otherwise). Steps placed after an If or Switch run whichever branch was taken.
 - **Fields, not code**: every step shows the data the earlier steps gave. Drag a field into
   a setting, or make a setting depend on one (level 1 to 2 → $5, level 3 → $10).
 - **Recipes**: ready-made workflows you switch on, such as *Staff card by volunteer level*
@@ -69,6 +71,6 @@ Until the village has shared accounts, people are matched between buildings by e
 
 ## Not built yet
 
-Branches with more than one path, loops over lists, workflow versions, a recipe gallery
+Loops over lists, workflow versions, a recipe gallery
 shared between organizations, and per-connection scopes (a connection can use every action
 its building offers).

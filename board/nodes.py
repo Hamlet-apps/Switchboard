@@ -9,7 +9,7 @@ A definition (also what the builder's JavaScript gets):
      "tile": {"icon"} or {"code", "bg", "fg"}, "params": [...], "out": [{"key", "example"}]}
 """
 from . import buildings
-from .templating import OPS, UNARY, flatten, is_empty, unflatten
+from .templating import MAP_OPS, OPS, UNARY, flatten, is_empty, unflatten
 
 TRIGGERS = ('manual', 'schedule', 'webhook', 'failure', 'event')
 
@@ -56,8 +56,8 @@ BUILTIN = {
                 ('step', 'Issue staff card'), ('error', "503 · Pavilion didn't answer after 3 tries")],
     },
     'condition': {
-        'icon': 'call_split', 'kind': 'Logic', 'title': 'Only continue if…',
-        'desc': 'Stops the workflow here unless the check passes. Stopped runs are still logged.',
+        'icon': 'filter_alt', 'kind': 'Logic', 'title': 'Filter',
+        'desc': 'Only continues if the condition is true. Otherwise the workflow stops here, and the run is logged as stopped.',
         'params': [
             {'key': 'left', 'label': 'Check this field', 'type': 'string', 'required': True},
             {'key': 'op', 'label': 'It', 'type': 'choice', 'default': 'true', 'plain': True, 'choices': _choices(OPS)},
@@ -65,6 +65,27 @@ BUILTIN = {
              'show_if': {'op': [op for op, _ in OPS if op not in UNARY]}},
         ],
         'out': [('passed', True)],
+    },
+    'if': {
+        'icon': 'call_split', 'kind': 'Logic', 'title': 'If',
+        'desc': 'Checks a condition and goes one of two ways: the True branch or the False branch. '
+                'Steps after it run whichever way it went.',
+        'params': [
+            {'key': 'left', 'label': 'Check this field', 'type': 'string', 'required': True},
+            {'key': 'op', 'label': 'It', 'type': 'choice', 'default': 'true', 'plain': True, 'choices': _choices(OPS)},
+            {'key': 'right', 'label': 'This', 'type': 'string',
+             'show_if': {'op': [op for op, _ in OPS if op not in UNARY]}},
+        ],
+        'out': [('result', True), ('branch', 'true')],
+    },
+    'switch': {
+        'icon': 'alt_route', 'kind': 'Logic', 'title': 'Switch',
+        'desc': 'Looks at one field and takes the first case that matches, or Otherwise when none does. '
+                'Steps after it run whichever case was taken.',
+        'params': [
+            {'key': 'on', 'label': 'Look at this field', 'type': 'string', 'required': True},
+        ],
+        'out': [('matched', True), ('branch', 'case'), ('case', 'is 3')],
     },
     'http': {
         'icon': 'language', 'kind': 'HTTP request', 'title': 'Send an HTTP request',
@@ -84,7 +105,9 @@ BUILTIN = {
 }
 
 TRIGGER_BASICS = ['manual', 'schedule', 'webhook', 'failure']
-STEP_BASICS = ['condition', 'http']
+STEP_BASICS = ['condition', 'if', 'switch', 'http']
+BRANCHING = ('if', 'switch')
+MAX_DEPTH = 4
 
 
 def _builtin(node):
@@ -214,6 +237,65 @@ def visible(param, values):
     return True
 
 
+# --- the step tree ----------------------------------------------------------------------------
+# An If or Switch step holds its branches: [{"id", "steps": [...]}, …]. If has "true" and
+# "false"; Switch has one per case ({"id", "op", "value", "value2", "label"}) and "default".
+
+def new_branches(node):
+    if node == 'if':
+        return [{'id': 'true', 'steps': []}, {'id': 'false', 'steps': []}]
+    if node == 'switch':
+        return [{'id': 'c1', 'op': 'eq', 'value': '', 'value2': '', 'label': '', 'steps': []},
+                {'id': 'default', 'steps': []}]
+    return None
+
+
+def branch_label(step, branch):
+    """What a branch is called on the canvas and in the run log."""
+    if step.get('node') == 'if':
+        return 'True' if branch['id'] == 'true' else 'False'
+    if branch['id'] == 'default':
+        return 'Otherwise'
+    if branch.get('label'):
+        return branch['label']
+    words = dict(MAP_OPS).get(branch.get('op'), 'is')
+    if branch.get('op') == 'between':
+        return f"{words} {branch.get('value', '')} and {branch.get('value2', '')}"
+    return f"{words} {branch.get('value', '')}".strip()
+
+
+def walk(steps):
+    """Every step, parents before their branches, in the order the canvas shows them."""
+    for step in steps or []:
+        yield step
+        for branch in step.get('branches') or []:
+            yield from walk(branch.get('steps'))
+
+
+def find(steps, uid):
+    return next((step for step in walk(steps) if step.get('uid') == uid), None)
+
+
+def before(steps, uid):
+    """The steps whose output `uid` can use: everything that can have run before it.
+
+    Steps in a sibling branch never run in the same run, so they are left out; steps inside
+    an earlier If or Switch are kept (the step may run after either branch).
+    """
+    def search(items, seen):
+        for step in items:
+            if step.get('uid') == uid:
+                return seen
+            mine = seen + [step]
+            for branch in step.get('branches') or []:
+                found = search(branch.get('steps') or [], mine)
+                if found is not None:
+                    return found
+            seen = seen + list(walk([step]))
+        return None
+    return search(steps or [], []) or []
+
+
 def problems(steps, connections):
     """Why a workflow can't run yet, in plain words. Empty when it can."""
     if not steps:
@@ -222,17 +304,21 @@ def problems(steps, connections):
     first = describe(steps[0], connections)
     if not first['trigger']:
         found.append('The first step has to be a trigger.')
-    for index, step in enumerate(steps):
+    for index, step in enumerate(walk(steps)):
         definition = describe(step, connections)
         if definition.get('missing'):
-            found.append(f'Step {index + 1}: {definition["desc"]}')
+            found.append(f'"{definition["title"]}": {definition["desc"]}')
             continue
         if index > 0 and definition['trigger']:
-            found.append(f'Step {index + 1} is a trigger. Only the first step can be one.')
+            found.append(f'"{definition["title"]}" is a trigger. Only the first step can be one.')
         values = {**new_params(definition), **(step.get('params') or {})}
         for param in definition['params']:
             if param.get('required') and visible(param, values) and is_empty(values.get(param['key'])):
                 found.append(f'"{definition["title"]}" needs {param["label"].lower()}.')
+        if step.get('node') == 'switch':
+            for branch in step.get('branches') or []:
+                if branch['id'] != 'default' and is_empty(branch.get('value')):
+                    found.append('A Switch case has nothing to compare with.')
         connection = connections.get(step.get('connection'))
         if connection is not None and connection.status == connection.BROKEN:
             found.append(f'{connection.name} needs reconnecting.')

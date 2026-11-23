@@ -1,7 +1,8 @@
 """Running workflows.
 
-`start_run` records a run with the trigger's data; `execute` works through the steps,
-writing a RunStep per step. A step that hits a network error or a 5xx is tried again after
+`start_run` records a run with the trigger's data; `execute` works through the steps
+(a tree: If and Switch steps run one of their branches, then the steps after them),
+writing a RunStep per step it does. A step that hits a network error or a 5xx is tried again after
 `settings.STEP_RETRY_WAITS`; a 4xx fails at once. A failed run can be retried from the step
 that failed (`retry`): earlier steps' results are kept, and every action call carries an
 Idempotency-Key made from the run and the step, so nothing is ever done twice.
@@ -74,7 +75,7 @@ def _settings_of(step, definition, ctx, secrets):
         except ValueError as error:
             raise BuildingError(f'{param["label"]}: {error}.')
         if value is None:
-            if param.get('required') and definition['node'] != 'condition':
+            if param.get('required') and definition['node'] not in ('condition', 'if', 'switch'):
                 raise BuildingError(f'{param["label"]} is empty. Check where this step gets it from.')
             continue
         values[param['key']] = value
@@ -102,6 +103,24 @@ def perform(step, definition, ctx, connections, secrets, dedupe):
         if not passed:
             raise Stop("Check didn't pass, so the workflow stopped here")
         return {'passed': True}, values, 'Check passed'
+    if node == 'if':
+        result = templating.compare(values.get('left'), values.get('op', 'true'), values.get('right'))
+        return {'result': result, 'branch': 'true' if result else 'false'}, values, 'True' if result else 'False'
+    if node == 'switch':
+        on = values.get('on')
+        for branch in step.get('branches') or []:
+            if branch['id'] == 'default':
+                continue
+            first = templating.resolve(branch.get('value', ''), ctx, secrets)
+            if branch.get('op') == 'between':
+                hit = (templating.compare(on, 'gte', first)
+                       and templating.compare(on, 'lte', templating.resolve(branch.get('value2', ''), ctx, secrets)))
+            else:
+                hit = templating.compare(on, branch.get('op') or 'eq', first)
+            if hit:
+                label = nodes.branch_label(step, branch)
+                return {'matched': True, 'branch': branch['id'], 'case': label}, values, label
+        return {'matched': False, 'branch': 'default', 'case': 'Otherwise'}, values, 'Otherwise'
     if node == 'http':
         body = values.get('body')
         output = buildings.http_request(values.get('method', 'POST'), str(values.get('url', '')).strip(),
@@ -155,63 +174,94 @@ def start_run(workflow, trigger_output, label, event=None, is_test=False, from_f
     return run
 
 
+class _Halt(Exception):
+    """Ends a run from anywhere in the step tree."""
+
+    def __init__(self, status, error='', uid=''):
+        self.status, self.error, self.uid = status, error, uid
+
+
 def execute(run):
-    """Work through a queued run. Safe to call from several workers: only one claims it."""
+    """Work through a queued run. Safe to call from several workers: only one claims it.
+
+    Steps that already have a result (the trigger, and everything before the failed step on
+    a retry) are not done again; an If or Switch that already decided keeps its decision.
+    """
     if not Run.objects.filter(pk=run.pk, status=Run.QUEUED).update(status=Run.RUNNING, started_at=timezone.now()):
         return None
     run.refresh_from_db()
     started = time.monotonic()
     connections, secrets = _connections(), _secrets()
     ctx = dict(run.context)
-    status, error, failed_step = Run.SUCCEEDED, '', None
+    done = set(run.step_results.filter(status=RunStep.OK).values_list('uid', flat=True))
+    order = {'next': run.step_results.count()}
 
-    for index, step in enumerate(run.steps):
-        if index < run.start_at:
-            continue
-        definition = nodes.describe(step, connections)
-        result = {'uid': step['uid'], 'title': definition['title'], 'tries': 1, 'duration_ms': 0,
-                  'sent': None, 'output': None, 'error': '', 'note': ''}
-        if index == 0:
-            result.update(status=RunStep.OK, output=ctx.get(step['uid']), note=run.trigger_label)
+    def record(step, definition, **result):
+        existing = RunStep.objects.filter(run=run, uid=step['uid']).first()
+        if existing is None:
+            index, order['next'] = order['next'], order['next'] + 1
         else:
-            began = time.monotonic()
-            try:
-                output, sent, note, tries = perform_with_retries(step, definition, ctx, connections, secrets, run.dedupe)
-                ctx[step['uid']] = output
-                result.update(status=RunStep.OK, output=output, sent=_redact(sent, secrets), note=note, tries=tries)
-            except Stop as stop:
-                status = Run.STOPPED
-                result.update(status=RunStep.STOPPED, note=str(stop))
-            except BuildingError as failure:
-                status, error, failed_step = Run.FAILED, str(failure), index
-                result.update(status=RunStep.FAILED, error=_redact(str(failure), secrets)[:500],
-                              tries=getattr(failure, 'tries', 1))
-            except Exception as crash:  # a bug in Switchboard must not leave the run "running" forever
-                log.exception('Run %s crashed at step %s', run.pk, index)
-                status, error, failed_step = Run.FAILED, f'Switchboard hit an unexpected problem: {crash}', index
-                result.update(status=RunStep.FAILED, error=error[:500])
-            result['duration_ms'] = int((time.monotonic() - began) * 1000)
-        RunStep.objects.update_or_create(run=run, index=index, defaults=result)
-        if status != Run.SUCCEEDED:
-            break
+            index = existing.index
+        defaults = {'index': index, 'title': definition['title'], 'tries': 1, 'duration_ms': 0, 'sent': None,
+                    'output': None, 'error': '', 'note': '', **result}
+        RunStep.objects.update_or_create(run=run, uid=step['uid'], defaults=defaults)
 
-    run.status, run.error, run.failed_step = status, _redact(error, secrets)[:500], failed_step
+    def run_list(steps):
+        for step in steps:
+            uid = step['uid']
+            definition = nodes.describe(step, connections)
+            if uid in ctx and uid in done:
+                output = ctx[uid]
+            elif uid in ctx:            # the trigger: its data came with the run
+                output = ctx[uid]
+                record(step, definition, status=RunStep.OK, output=output, note=run.trigger_label)
+            else:
+                began = time.monotonic()
+                took = lambda: int((time.monotonic() - began) * 1000)  # noqa: E731
+                try:
+                    output, sent, note, tries = perform_with_retries(step, definition, ctx, connections, secrets, run.dedupe)
+                except Stop as stop:
+                    record(step, definition, status=RunStep.STOPPED, note=str(stop), duration_ms=took())
+                    raise _Halt(Run.STOPPED)
+                except BuildingError as failure:
+                    record(step, definition, status=RunStep.FAILED, error=_redact(str(failure), secrets)[:500],
+                           tries=getattr(failure, 'tries', 1), duration_ms=took())
+                    raise _Halt(Run.FAILED, str(failure), uid)
+                except Exception as crash:  # a bug in Switchboard must not leave the run "running" forever
+                    log.exception('Run %s crashed at step %s', run.pk, uid)
+                    message = f'Switchboard hit an unexpected problem: {crash}'
+                    record(step, definition, status=RunStep.FAILED, error=message[:500], duration_ms=took())
+                    raise _Halt(Run.FAILED, message, uid)
+                ctx[uid] = output
+                record(step, definition, status=RunStep.OK, output=output, sent=_redact(sent, secrets), note=note,
+                       tries=tries, duration_ms=took())
+            if step.get('node') in nodes.BRANCHING and isinstance(output, dict):
+                chosen = next((b for b in step.get('branches') or [] if b['id'] == output.get('branch')), None)
+                if chosen:
+                    run_list(chosen.get('steps') or [])
+
+    status, error, failed_uid = Run.SUCCEEDED, '', ''
+    try:
+        run_list(run.steps)
+    except _Halt as halt:
+        status, error, failed_uid = halt.status, halt.error, halt.uid
+
+    run.status, run.error, run.failed_uid = status, _redact(error, secrets)[:500], failed_uid
     run.context = ctx
     run.finished_at = timezone.now()
     run.duration_ms += int((time.monotonic() - started) * 1000)
-    run.save(update_fields=['status', 'error', 'failed_step', 'context', 'finished_at', 'duration_ms'])
+    run.save(update_fields=['status', 'error', 'failed_uid', 'context', 'finished_at', 'duration_ms'])
     if status == Run.FAILED and not run.is_test and not run.from_failure:
         _announce_failure(run)
     return run
 
 
 def retry(run):
-    """Queue a failed run again from the step that failed."""
-    if run.status != Run.FAILED or run.failed_step is None:
+    """Queue a failed run again. It carries on from the step that failed."""
+    if run.status != Run.FAILED or not run.failed_uid:
         return False
     updated = Run.objects.filter(pk=run.pk, status=Run.FAILED).update(
-        status=Run.QUEUED, start_at=run.failed_step, error='', failed_step=None,
-        retries=run.retries + 1, finished_at=None,
+        status=Run.QUEUED, error='', failed_uid='', retries=run.retries + 1, finished_at=None,
     )
     if updated:
         run.refresh_from_db()
@@ -225,7 +275,7 @@ def _announce_failure(run):
                  if w.steps and w.steps[0].get('node') == 'failure']
     if not listeners:
         return
-    failed = run.steps[run.failed_step] if run.failed_step is not None and run.failed_step < len(run.steps) else {}
+    failed = nodes.find(run.steps, run.failed_uid)
     title = nodes.describe(failed, _connections())['title'] if failed else ''
     base = Settings.load().public_url.rstrip('/')
     data = {

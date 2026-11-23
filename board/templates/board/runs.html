@@ -65,7 +65,7 @@
     </header>
     <ol class="run-steps">
       {% for step in selected.steps %}
-      <li class="is-{{ step.status }}">
+      <li class="is-{{ step.status }}"{% if step.depth %} style="margin-left: {% widthratio step.depth 1 18 %}px"{% endif %}>
         <span class="ms fill is-{{ step.status }}" aria-hidden="true">{% if step.status == 'ok' %}check_circle{% elif step.status == 'failed' %}error{% elif step.status == 'stopped' %}do_not_disturb_on{% else %}radio_button_unchecked{% endif %}</span>
         <div class="body">
           <b>{{ step.title }}</b>
@@ -74,7 +74,7 @@
           {% if step.sent or step.output %}
           <details class="peek"><summary>What went in and out</summary>
             {% if step.sent %}<h4>Sent</h4><pre>{{ step.sent }}</pre>{% endif %}
-            {% if step.output %}<h4>{% if forloop.first %}Trigger data{% else %}Came back{% endif %}</h4><pre>{{ step.output }}</pre>{% endif %}
+            {% if step.output %}<h4>{% if step.first %}Trigger data{% else %}Came back{% endif %}</h4><pre>{{ step.output }}</pre>{% endif %}
           </details>
           {% endif %}
         </div>
@@ -84,7 +84,7 @@
     <div class="run-actions">
       {% if selected.run.status == 'failed' %}
       <form method="post" action="{% url 'run_retry' selected.run.pk %}">{% csrf_token %}<input type="hidden" name="back" value="{{ request.get_full_path }}">
-        <button type="submit" class="btn primary"><span class="ms" aria-hidden="true">replay</span>Retry from step {{ selected.retry_step }}</button></form>
+        <button type="submit" class="btn primary"><span class="ms" aria-hidden="true">replay</span>Retry from “{{ selected.retry_from }}”</button></form>
       {% endif %}
       <a class="btn{% if selected.run.status == 'failed' %} icon{% endif %}" href="{% url 'builder' selected.run.workflow_id %}" aria-label="Open workflow in builder"><span class="ms" aria-hidden="true">open_in_new</span>{% if selected.run.status != 'failed' %}Open workflow{% endif %}</a>
     </div>

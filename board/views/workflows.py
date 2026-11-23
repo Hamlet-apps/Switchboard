@@ -42,7 +42,7 @@ def _cards(workflows, connections):
     for workflow in workflows:
         runs = recent.get(workflow.id, [])
         tiles, seen = [], set()
-        for step in workflow.steps:
+        for step in nodes.walk(workflow.steps):
             tile = nodes.describe(step, connections)
             key = tile['tile'].get('code') or tile['tile'].get('icon')
             if key not in seen and len(tiles) < 4:
@@ -53,7 +53,7 @@ def _cards(workflows, connections):
         state = state_of(workflow, runs[0] if runs else None)
         cards.append({
             'workflow': workflow, 'tiles': tiles, 'state': state, 'state_label': STATE_LABELS[state],
-            'strip': strip, 'steps': len(workflow.steps), 'total': totals.get(workflow.id, 0),
+            'strip': strip, 'steps': sum(1 for _ in nodes.walk(workflow.steps)), 'total': totals.get(workflow.id, 0),
             'last': runs[0].created_at if runs else None,
         })
     return cards

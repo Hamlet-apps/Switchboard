@@ -48,6 +48,11 @@
         <ul>{% for t in card.triggers %}<li><span class="ms" aria-hidden="true">bolt</span><span>{{ t.title|default:t.type }}</span><code>{{ t.type }}</code></li>{% endfor %}</ul></details>
       <details><summary>{{ card.actions|length }} thing{{ card.actions|length|pluralize }} workflows can do there</summary>
         <ul>{% for a in card.actions %}<li><span class="ms" aria-hidden="true">{% if a.kind == 'lookup' %}search{% else %}play_arrow{% endif %}</span><span>{{ a.title|default:a.name }}</span><code>{{ a.name }}</code></li>{% endfor %}</ul></details>
+      {% if c.contract_notes %}
+      <details class="notes"><summary>{{ c.contract_notes|length }} thing{{ c.contract_notes|length|pluralize }} that {{ c.contract_notes|length|pluralize:"doesn't,don't" }} match what {{ c.name }} says about itself</summary>
+        <p class="hint">Workflows still run. These are for whoever looks after {{ c.name }}; "Check again" clears them once it is updated.</p>
+        <ul>{% for note in c.contract_notes %}<li><span class="ms" aria-hidden="true">rule</span><span>{{ note }}</span></li>{% endfor %}</ul></details>
+      {% endif %}
       <div class="bld-actions">
         <form method="post" action="{% url 'building_refresh' c.pk %}">{% csrf_token %}<button type="submit" class="btn small"><span class="ms" aria-hidden="true">sync</span>Check again</button></form>
         {% if c.status != 'connected' %}<form method="post" action="{% url 'building_connect' %}">{% csrf_token %}<input type="hidden" name="address" value="{{ c.base_url }}"><button type="submit" class="btn small primary"><span class="ms" aria-hidden="true">power</span>Reconnect</button></form>{% endif %}

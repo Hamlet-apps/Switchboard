@@ -90,6 +90,8 @@ class Connection(models.Model):
     manifest = models.JSONField(default=dict)
     manifest_at = models.DateTimeField(null=True, blank=True)
     # The building's own logo, fetched from the manifest's `icon` and served from here.
+    # Where the building doesn't match its own manifest (board/schema.py): for its maintainers.
+    contract_notes = models.JSONField(default=list)
     icon_type = models.CharField(max_length=40, blank=True, default='')
     icon_data = models.TextField(blank=True, default='')   # base64
     api_key_enc = models.TextField(blank=True, default='')

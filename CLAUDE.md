@@ -31,6 +31,7 @@ One app, `board`.
 | `models.py` | `Settings` (singleton, `Settings.load()`), `Secret`, `Folder`, `Connection`, `Workflow` (steps are JSON), `Event`, `Run`, `RunStep` |
 | `nodes.py` | What every kind of step is. Built-ins (`manual`, `schedule`, `webhook`, `failure`, `condition` = Filter, `if`, `switch`, `http`) are described here; `event` and `action` nodes are generated from a connection's manifest. `catalog()` feeds the picker, `problems()` says why a workflow can't run |
 | `templating.py` | `{{uid.path}}` tokens, `{{secret.NAME}}`, lookup tables (`{"map": …}`: no longer offered in the builder, a Switch does that; still resolved for workflows that have one), `compare()` for conditions, `coerce()` to a param's type |
+| `schema.py` | Holding buildings to their manifest: `manifest_problems` (refuse or note, at connect and Check again), `check_params` and `literal_problem` (a step's settings against the params' types and limits, before sending), `mismatches` + `remember` (answers and events that don't match, kept on `Connection.contract_notes` and shown on the Buildings page; never fails a run) |
 | `buildings.py` | Manifest, handshake, action calls, signature check, and the HTTP step. Every outgoing request goes through `_http` |
 | `engine.py` | `start_run`, `execute` (retries on network errors and 5xx, never 4xx), `retry` (from the failed step), `receive_event`, missed events and replay, "a workflow failed" |
 | `worker.py` | The background thread (`submit`, `kick`), schedules (`next_fire`, `fire_schedules`), pruning |

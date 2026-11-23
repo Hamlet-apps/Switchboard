@@ -112,11 +112,19 @@ def fetch_manifest(base_url):
         raise BuildingError("This building speaks a newer protocol than this Switchboard. Update Switchboard.")
     manifest['triggers'] = [t for t in manifest.get('triggers') or [] if isinstance(t, dict) and t.get('type')]
     manifest['actions'] = [a for a in manifest.get('actions') or [] if isinstance(a, dict) and a.get('name')]
+    from . import schema
+    errors, _notes = schema.manifest_problems(manifest)
+    if errors:
+        more = f' (and {len(errors) - 1} more)' if len(errors) > 1 else ''
+        raise BuildingError(f"{manifest['name']} describes itself in a way Switchboard can't use: {errors[0]}{more}. "
+                            'The building needs updating.')
     return manifest
 
 
 def apply_manifest(connection, manifest):
+    from . import schema
     connection.manifest = manifest
+    connection.contract_notes = schema.manifest_problems(manifest)[1][:schema.MAX_NOTES]
     connection.manifest_at = timezone.now()
     connection.building = manifest['building'][:60]
     connection.name = manifest['name'][:80]

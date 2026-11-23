@@ -16,6 +16,7 @@ urlpatterns = [
     path('workflows/<int:pk>/test-step/', views.workflow_test_step, name='workflow_test_step'),
     path('workflows/<int:pk>/listen/', views.workflow_listen, name='workflow_listen'),
     path('workflows/<int:pk>/preview/', views.workflow_preview, name='workflow_preview'),
+    path('workflows/<int:pk>/options/', views.workflow_options, name='workflow_options'),
     path('workflows/<int:pk>/run/', views.workflow_run, name='workflow_run'),
     path('workflows/<int:pk>/replay/', views.workflow_replay, name='workflow_replay'),
     path('workflows/<int:pk>/delete/', views.workflow_delete, name='workflow_delete'),

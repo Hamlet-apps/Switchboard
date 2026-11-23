@@ -305,6 +305,8 @@ def _param(spec):
         out['value_type'] = str(spec.get('type') or 'string')
     if spec.get('default') is not None:
         out['default'] = spec['default']
+    if not choices and isinstance(spec.get('options'), str) and spec['options']:
+        out['options'] = spec['options']   # a list the building serves live: a dropdown in the builder
     return out
 
 
@@ -334,7 +336,7 @@ def _action(connection, action):
         'id': f"action:{connection.id}:{action['name']}", 'node': 'action', 'connection': connection.id,
         'key': action['name'], 'trigger': False, 'lookup': lookup, 'group': _group(action, action['name']),
         'title': str(action.get('title') or action['name']), 'desc': str(action.get('description') or ''),
-        'kind': f"{connection.name} · {'Look up' if lookup else 'Action'}",
+        'kind': f"{connection.name} · {'Look up' if lookup else 'Action'}", 'building': connection.name,
         'tile': buildings.look(connection.building, connection.name, connection),
         'params': [_param(p) for p in action.get('params') or [] if isinstance(p, dict) and p.get('key')],
         'can_fail_on': True,

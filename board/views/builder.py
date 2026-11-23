@@ -14,7 +14,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from .. import engine, expressions, nodes, templating, worker
+from .. import buildings, engine, expressions, nodes, templating, worker
 from ..buildings import BuildingError
 from ..models import Connection, Event, Folder, Run, Secret, Settings, Workflow
 from ..templating import MAP_OPS
@@ -182,7 +182,7 @@ def builder(request, pk):
         'builtins': list(nodes.BUILTIN),
         'problems': nodes.problems(workflow.steps, by_id) if workflow.steps else [],
         'urls': {name: reverse(f'workflow_{name}', args=[workflow.pk])
-                 for name in ('save', 'toggle', 'test', 'test_step', 'listen', 'run', 'preview')},
+                 for name in ('save', 'toggle', 'test', 'test_step', 'listen', 'run', 'preview', 'options')},
         'expressionHelp': expressions.help_rows(),
         'buildingsUrl': reverse('buildings'),
         'openPicker': not workflow.steps,
@@ -303,6 +303,19 @@ def workflow_preview(request, workflow, body):
 # How long the webhook's test URL stays open after the builder last asked. The builder asks
 # every 2 s, so this only matters once it stops (closed tab, lost connection).
 TEST_URL_GRACE = datetime.timedelta(seconds=30)
+
+
+@json_call
+def workflow_options(request, workflow, body):
+    """The list a building param offers (its manifest `options`), read from the building now."""
+    connection = Connection.objects.filter(pk=body.get('connection')).first()
+    if connection is None:
+        return JsonResponse({'error': 'That building is no longer connected.'})
+    try:
+        options = buildings.fetch_options(connection, body.get('name'))
+    except BuildingError as error:
+        return JsonResponse({'error': str(error)})
+    return JsonResponse({'ok': True, 'options': options})
 
 
 @json_call

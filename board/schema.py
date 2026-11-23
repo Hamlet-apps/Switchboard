@@ -20,6 +20,7 @@ TYPES = ('string', 'int', 'number', 'bool', 'datetime', 'money')
 FIELD_TYPES = TYPES + ('list',)        # fields (outputs, events) may also be lists; params may not
 LIST_LIMIT = 200
 NAME = re.compile(r'^[a-z0-9_]+(\.[a-z0-9_]+)*$')
+OPTIONS_NAME = re.compile(r'^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$')   # buildings.OPTIONS_NAME
 KEY = re.compile(r'^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$')
 MAX_NOTES = 20
 
@@ -98,6 +99,8 @@ def _params(items, where, errors, notes):
         if 'choices' in param and not (isinstance(param['choices'], list) and all(
                 isinstance(c, dict) and 'value' in c for c in param['choices'])):
             notes.append(f'{where}: the choices for "{key}" should be a list of {{"value", "label"}}')
+        if 'options' in param and not (isinstance(param['options'], str) and OPTIONS_NAME.match(param['options'])):
+            notes.append(f'{where}: "options" on "{key}" should name a list, like "roles"')
         if 'default' in param and param['default'] is not None and type_error(param['default'], param['type']):
             notes.append(f'{where}: the default for "{key}" {type_error(param["default"], param["type"])}')
 

@@ -70,6 +70,11 @@ One app, `board`.
 - **Logos**: a building's tile comes from `buildings.look()`: the copy of its manifest `icon`
   (`Connection.icon_data`, served by `building_icon` as an image only), else the bundled logo in
   `static/board/buildings/<slug>.svg`, else its initials.
+- **Options**: a building param with `"options": "<name>"` (PROTOCOL.md, "Options from the building") is a
+  dropdown in the builder (`optionsControl` in `builder.js`), filled from the building when the step is opened
+  (`workflow_options` → `buildings.fetch_options`, `GET {api_base}/options/<name>`; nothing cached server-side). It
+  still takes a field instead ("Use a field from an earlier step…"), and a saved value the building no longer has
+  is shown as such. The building checks the value when the action runs, as before.
 - **A step** is `{"uid", "node", "connection", "key", "params"}`; the first step is the trigger.
   A param is text with tokens, or a lookup table. A setting that is exactly one token keeps
   the value's type, and so does one that is exactly one expression (`{{ s1.price * 2 }}`).

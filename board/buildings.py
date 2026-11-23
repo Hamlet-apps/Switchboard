@@ -5,6 +5,7 @@ Every outgoing request goes through `_http`, which tests replace.
 import hashlib
 import hmac
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -223,6 +224,41 @@ def call_action(connection, action, params, idempotency_key=''):
     message = _error_text(data) or (f"{connection.name} didn't answer properly." if status < 300 else f"{connection.name} answered {status}.")
     code = data['error'].get('code', '') if isinstance(data, dict) and isinstance(data.get('error'), dict) else ''
     raise BuildingError(f'{status} · {message}', status=status, retry=status >= 500, code=code)
+
+
+OPTIONS_NAME = re.compile(r'^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$')
+OPTIONS_LIMIT = 500
+
+
+def fetch_options(connection, name):
+    """A list a param's `options` names, read live from the building (PROTOCOL.md: "Options from
+    the building"): [{"value", "label"}], at most OPTIONS_LIMIT, values kept as the building gave them."""
+    if connection.status != connection.CONNECTED:
+        raise BuildingError(f'{connection.name} is not connected. Reconnect it on the Buildings page.')
+    if not isinstance(name, str) or not OPTIONS_NAME.match(name):
+        raise BuildingError(f"{connection.name}'s manifest names a list Switchboard can't ask for.")
+    status, raw = _http('GET', f'{connection.api_base}/options/{name}', _auth(connection))
+    data = _json(raw)
+    if status == 401:
+        connection.status = connection.BROKEN
+        connection.last_error = f'{connection.name} no longer accepts our key.'
+        connection.save(update_fields=['status', 'last_error'])
+        raise BuildingError(f'{connection.name} no longer accepts our key. Reconnect it on the Buildings page.', status=401)
+    if status != 200 or not isinstance(data, dict) or not isinstance(data.get('options'), list):
+        message = _error_text(data) or f"{connection.name} didn't send the list ({status})."
+        raise BuildingError(message, status=status)
+    options, seen = [], set()
+    for item in data['options']:
+        if not isinstance(item, dict) or isinstance(item.get('value'), (dict, list, bool)) or item.get('value') in (None, ''):
+            continue
+        value = item['value']
+        if str(value) in seen:
+            continue
+        seen.add(str(value))
+        options.append({'value': value, 'label': str(item.get('label') or value)[:200]})
+        if len(options) >= OPTIONS_LIMIT:
+            break
+    return options
 
 
 def ping(connection):

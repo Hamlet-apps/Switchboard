@@ -673,6 +673,64 @@ class ContractTests(Base):
             self.assertNotEqual(type_error(value, kind), '', (value, kind))
 
 
+class OptionsTests(Base):
+    """A param can offer a list the building serves live (PROTOCOL.md: "Options from the building")."""
+
+    url = 'https://pv.test/switchboard/v1/options/roles'
+
+    def setUp(self):
+        super().setUp()
+        manifest = json.loads(json.dumps(PV_MANIFEST))
+        manifest['actions'][1]['params'].append({'key': 'role', 'type': 'string', 'label': 'Role', 'options': 'roles'})
+        buildings.apply_manifest(self.pv, manifest)
+        self.pv.save()
+        self.workflow = Workflow.objects.create(name='Invite', steps=[
+            {'uid': 't', 'node': 'manual', 'params': {}, 'next': {'main': 'a'}},
+            {'uid': 'a', 'node': 'action', 'connection': self.pv.id, 'key': 'staff.ensure', 'params': {}, 'next': {}}])
+
+    def ask(self, **body):
+        body = {'connection': self.pv.id, 'name': 'roles', **body}
+        return self.client.post(reverse('workflow_options', args=[self.workflow.pk]), json.dumps(body),
+                                content_type='application/json').json()
+
+    def test_the_param_says_where_its_list_comes_from(self):
+        role = nodes.describe(self.workflow.steps[1], {self.pv.id: self.pv})['params'][-1]
+        self.assertEqual((role['type'], role['options']), ('string', 'roles'))
+        self.assertEqual(nodes.describe(self.workflow.steps[1], {self.pv.id: self.pv})['building'], 'Pavilion')
+        page = self.client.get(reverse('builder', args=[self.workflow.pk]))
+        self.assertContains(page, reverse('workflow_options', args=[self.workflow.pk]))
+
+    def test_the_list_is_read_from_the_building_each_time(self):
+        self.world.on('GET', self.url, (200, {'options': [{'value': 'Cook', 'label': 'Cook'}, {'value': 'Barista'},
+                                                          {'value': 'Cook', 'label': 'again'}, {'value': ''}, {'label': 'no value'},
+                                                          {'value': {'x': 1}}, {'value': 12, 'label': 'By id'}]}),
+                      (200, {'options': [{'value': 'Cook', 'label': 'Cook'}, {'value': 'First aid', 'label': 'First aid'}]}))
+        self.assertEqual(self.ask(), {'ok': True, 'options': [{'value': 'Cook', 'label': 'Cook'}, {'value': 'Barista', 'label': 'Barista'},
+                                                              {'value': 12, 'label': 'By id'}]})
+        self.assertEqual([o['value'] for o in self.ask()['options']], ['Cook', 'First aid'])   # a role added since
+        call = self.world.to(self.url)[0]
+        self.assertEqual((call['method'], call['headers']['Authorization']), ('GET', 'Bearer sbk_test'))
+
+    def test_what_goes_wrong_is_said_plainly(self):
+        self.world.on('GET', self.url, (404, {'error': {'code': 'unknown_options', 'message': 'Pavilion has no list called roles.'}}))
+        self.assertEqual(self.ask(), {'error': 'Pavilion has no list called roles.'})
+        self.assertIn("can't ask for", self.ask(name='../secrets')['error'])
+        self.world.on('GET', self.url, (401, {}))
+        self.assertIn('no longer accepts our key', self.ask()['error'])
+        self.pv.refresh_from_db()
+        self.assertEqual(self.pv.status, Connection.BROKEN)
+        self.assertIn('not connected', self.ask()['error'])
+        self.assertEqual(self.ask(connection=999)['error'], 'That building is no longer connected.')
+
+    def test_a_manifest_naming_a_list_badly_is_noted(self):
+        from . import schema
+        manifest = json.loads(json.dumps(PV_MANIFEST))
+        manifest['actions'][1]['params'].append({'key': 'role', 'type': 'string', 'label': 'Role', 'options': 'Roles!'})
+        errors, notes = schema.manifest_problems(manifest)
+        self.assertEqual(errors, [])
+        self.assertIn('action "staff.ensure": "options" on "role" should name a list, like "roles"', notes)
+
+
 class LoopTests(Base):
     """For each: the "Each item" path runs once per item, then "When done"."""
 

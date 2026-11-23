@@ -761,7 +761,7 @@
   }
 
   // ---------- editor ----------
-  function openEditor(id) { closePicker(); editing = id; activeSlot = null; savedRange = null; renderFlow(); renderEditor(); }
+  function openEditor(id) { optionLists = {}; closePicker(); editing = id; activeSlot = null; savedRange = null; renderFlow(); renderEditor(); }
   function closeEditor() { if (!editing) return; stopListening(); editing = null; veil.hidden = true; veil.textContent = ''; renderFlow(); }
   veil.addEventListener('mousedown', function (event) { if (event.target === veil) closeEditor(); });
   document.addEventListener('keydown', function (event) {
@@ -1097,6 +1097,62 @@
     return h('div', { class: 'param' }, h('div', { class: 'param-label' }, h('span', { class: 'name', text: 'Cases' })), box);
   }
 
+  // Lists a building serves for a param (its manifest `options`, e.g. the roles that exist now). Read when the
+  // step is opened, so they're current; kept until the editor opens again.
+  var optionLists = {}, fieldMode = {};
+  function optionList(step, param) {
+    var key = step.connection + ':' + param.options;
+    if (optionLists[key]) return optionLists[key];
+    var entry = optionLists[key] = { status: 'loading', options: [] };
+    post(data.urls.options, { connection: step.connection, name: param.options }).then(function (answer) {
+      entry.status = answer.ok ? 'ok' : 'failed';
+      entry.options = answer.options || [];
+      entry.error = answer.error || '';
+      if (editing === step.uid) renderEditor();
+    });
+    return entry;
+  }
+
+  // A dropdown of what's really in the building, which still takes a field from an earlier step instead
+  function optionsControl(step, def, param, value, set, rerender) {
+    var mode = step.uid + ':' + param.key, text = value == null ? '' : String(value);
+    var usesField = fieldMode[mode] || tokensIn(text).length || text.indexOf('{{') >= 0;
+    var list = optionList(step, param), box = h('div', { class: 'options' }), where = def.building || def.kind;
+    var slot = function (placeholder) {
+      return makeSlot(text, { label: param.label, placeholder: placeholder, onchange: function (t) { set(t); } });
+    };
+    if (usesField) {
+      box.appendChild(slot('Drop a field here'));
+      box.appendChild(h('button', { type: 'button', class: 'linkish', onclick: function () {
+        delete fieldMode[mode]; set(''); rerender();
+      } }, icon('list'), 'Pick from ' + where + '’s list instead'));
+      return box;
+    }
+    if (list.status === 'failed') {
+      box.appendChild(slot('Type a value'));
+      box.appendChild(h('span', { class: 'help pinkish', text: 'Couldn’t get the list from ' + where + ': ' + list.error }));
+      box.appendChild(h('button', { type: 'button', class: 'linkish', onclick: function () {
+        delete optionLists[step.connection + ':' + param.options]; renderEditor();
+      } }, icon('refresh'), 'Try again'));
+      return box;
+    }
+    var known = list.options.some(function (o) { return String(o.value) === text; });
+    var select = h('select', { 'aria-label': param.label, disabled: list.status === 'loading', onchange: function () {
+      if (select.value === '\u0000field') { fieldMode[mode] = true; set(''); rerender(); return; }
+      var picked = list.options.filter(function (o) { return String(o.value) === select.value; })[0];
+      set(picked ? picked.value : select.value); rerender();
+    } },
+      list.status === 'loading' ? h('option', { text: 'Getting the list from ' + where + '…' }) : null,
+      list.status === 'ok' ? h('option', { value: '', text: param.required ? 'Choose…' : 'Not set', selected: !text }) : null,
+      list.status === 'ok' && text && !known ? h('option', { value: text, selected: true, text: text + ' (not in ' + where + ' now)' }) : null,
+      list.options.map(function (o) { return h('option', { value: String(o.value), text: o.label, selected: String(o.value) === text }); }),
+      list.status === 'ok' ? h('option', { value: '\u0000field', text: 'Use a field from an earlier step…' }) : null);
+    box.appendChild(select);
+    if (list.status === 'ok' && !list.options.length) box.appendChild(h('span', { class: 'help', text: where + ' has nothing to pick here yet.' }));
+    if (list.status === 'ok' && text && !known) box.appendChild(h('span', { class: 'help pinkish', text: where + ' has no “' + text + '” now. Pick one from the list.' }));
+    return box;
+  }
+
   function paramControl(step, def, param, index) {
     var value = paramValue(step, param);
     var wrap = h('div', { class: 'param' });
@@ -1104,7 +1160,9 @@
     var set = function (v) { step.params[param.key] = v; };
     var rerender = function () { touch(); renderEditor(); renderFlow(); };
 
-    if (param.type === 'choice') {
+    if (param.options && step.connection && !(value && typeof value === 'object')) {
+      wrap.appendChild(label); wrap.appendChild(optionsControl(step, def, param, value, set, rerender));
+    } else if (param.type === 'choice') {
       var select = h('select', { 'aria-label': param.label, onchange: function () { set(select.value); rerender(); } },
         param.required || param['default'] !== undefined ? null : h('option', { value: '', text: 'Not set' }),
         (param.choices || []).map(function (c) { return h('option', { value: c.value, text: c.label, selected: String(c.value) === String(value) }); }));

@@ -120,11 +120,34 @@ workflow can loop over them with a "For each" step:
   many there are in all in a separate `count` field.
 - Give each item what a later step needs to act on it without another lookup: its id, a
   name, and an email where it is a person.
-- Lists are for outputs and events. Params stay single values.
+- Lists are for outputs and events. Params stay single values (a param can still offer a
+  list to pick from: see "Options from the building").
 
 JSON types: `string` is a JSON string (ids too, even numeric ones), `int` a whole number,
 `number` and `money` a number (never text like `"10.00"`), `bool` true or false, `datetime`
 a string in ISO 8601 with an offset.
+
+### Options from the building
+
+A param whose value names something that lives in the building (a role, a station, a venue)
+may say where its options come from, so the builder offers a dropdown of what is really there
+instead of a text box:
+
+```json
+{"key": "role", "type": "string", "label": "Role", "required": false, "options": "roles"}
+```
+
+- `options` is the name of a list the building serves (lowercase words joined by dots or
+  underscores, like `roles` or `training.modules`). Several params may share one.
+- Switchboard reads it with `GET {api_base}/options/<name>` (section 3) when someone opens
+  the step, so the list is always current. Nothing is stored in the manifest.
+- The `value` of each option is exactly what the param accepts. Prefer a value that still
+  reads well if the list changes (a role's name where the param takes names; an ID where it
+  takes IDs). The `label` is what people see.
+- It is a suggestion, not a limit: a workflow may still fill the param from an earlier step's
+  field, and the building checks the value when the action runs as it always does (`422` with
+  what it does have, as before).
+- Use `choices` instead when the list is fixed in the code (a status, a channel).
 
 Buildings should hold themselves to it as well: each has `switchboard/contract.py`, and its
 tests check every action's answer and every event it emits against its own manifest.
@@ -168,6 +191,7 @@ Every call carries `Authorization: Bearer <api_key>`.
 | --- | --- |
 | `GET {api_base}/` | `{"ok": true, "building": "…", "instance": "…", "connection_id": "…"}`. Checks the key. |
 | `POST {api_base}{path}` | Runs an action from the manifest. Body: an object of its params. |
+| `GET {api_base}/options/<name>` | A list a param's `options` names: `{"options": [{"value": "Cook", "label": "Cook"}, …]}`, in the order to show them, at most 500. An unknown name is `404` `unknown_options`. Reads only. |
 | `DELETE {api_base}/connection` | Switchboard disconnecting. The key stops working, events stop. `{"ok": true}`. |
 
 Action responses are `200` with a JSON **object** whose keys match the manifest's `output`.
@@ -182,6 +206,7 @@ non-technical admin (it is shown in the run log):
 | 400 | `invalid_request` | Body isn't a JSON object |
 | 401 | `unauthorized` | Missing, wrong or revoked key |
 | 404 | `unknown_action` | No such action |
+| 404 | `unknown_options` | No such list of options |
 | 422 | `invalid_params` | A required param is missing or a value is wrong; say which |
 | 409 | `conflict` | The action can't be done in the current state |
 | 5xx | `server_error` | Anything unexpected |

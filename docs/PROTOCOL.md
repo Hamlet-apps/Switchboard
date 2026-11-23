@@ -72,6 +72,9 @@ All bodies are JSON (UTF-8). All paths below are fixed and sit outside any langu
   `example`; Switchboard uses the examples as sample data in the builder.
 - `summary` is a one-line template for the run log; `{key}` is replaced with the field.
 - `kind` is `lookup` (reads, safe to repeat) or `action` (changes something).
+- A trigger or action may give a `group` ("Orders", "Gift cards"): the heading it is listed
+  under when a building offers many. Without one, Switchboard uses the first word of its
+  `type` or `name`.
 - Param `type`s are the same list; a param may add `"choices": [{"value", "label"}]` and
   `"default"`. Missing optional params are simply left out of the request.
 - A param may state its limits: `"max_length"` for text, `"min"` and `"max"` for numbers.

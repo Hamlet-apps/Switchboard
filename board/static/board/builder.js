@@ -632,10 +632,15 @@
             h('span', null, h('b', { text: b.instance ? b.name + ' · ' + b.instance : b.name }), h('small', { class: b.broken ? 'warn' : '', text: b.sub })),
             icon(open ? 'expand_less' : 'expand_more')));
         if (open) {
-          group.appendChild(h('div', { class: 'pick-events' }, b.items.length ? b.items.map(function (d) {
-            return h('button', { type: 'button', title: d.desc, onclick: function () { pick(d); } },
-              icon(trig ? 'bolt' : (d.lookup ? 'search' : 'play_arrow')), d.title);
-          }) : h('span', { class: 'hint', text: trig ? 'This building sends no events.' : 'This building offers no actions.' })));
+          // A building with a lot to offer is easier to read under headings (Orders, Staff…).
+          var rows = [], last = null, headed = b.items.length > 8;
+          b.items.slice().sort(function (x, y) { return headed ? b.groups.indexOf(x.group) - b.groups.indexOf(y.group) : 0; }).forEach(function (d) {
+            if (headed && d.group !== last) { rows.push(h('h4', { class: 'pick-heading', text: d.group })); last = d.group; }
+            rows.push(h('button', { type: 'button', title: d.desc, onclick: function () { pick(d); } },
+              icon(trig ? 'bolt' : (d.lookup ? 'search' : 'play_arrow')), d.title));
+          });
+          group.appendChild(h('div', { class: 'pick-events' }, b.items.length ? rows
+            : h('span', { class: 'hint', text: trig ? 'This building sends no events.' : 'This building offers no actions.' })));
         }
         list.appendChild(group);
       });

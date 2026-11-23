@@ -155,8 +155,18 @@ def _param(spec):
     return out
 
 
+def _group(spec, name):
+    """The heading a trigger or action sits under in the picker: the manifest's `group`, else
+    the first word of its name ("staff_card.issue" -> "Staff card")."""
+    given = spec.get('group')
+    if isinstance(given, str) and given.strip():
+        return given.strip()[:40]
+    return name.split('.')[0].replace('_', ' ').capitalize()
+
+
 def _event(connection, trigger):
     return {
+        'group': _group(trigger, trigger['type']),
         'id': f"event:{connection.id}:{trigger['type']}", 'node': 'event', 'connection': connection.id,
         'key': trigger['type'], 'trigger': True,
         'title': str(trigger.get('title') or trigger['type']), 'desc': str(trigger.get('description') or ''),
@@ -169,7 +179,7 @@ def _action(connection, action):
     lookup = action.get('kind') == 'lookup'
     return {
         'id': f"action:{connection.id}:{action['name']}", 'node': 'action', 'connection': connection.id,
-        'key': action['name'], 'trigger': False, 'lookup': lookup,
+        'key': action['name'], 'trigger': False, 'lookup': lookup, 'group': _group(action, action['name']),
         'title': str(action.get('title') or action['name']), 'desc': str(action.get('description') or ''),
         'kind': f"{connection.name} · {'Look up' if lookup else 'Action'}",
         'tile': buildings.look(connection.building, connection.name, connection),
@@ -214,7 +224,7 @@ def catalog(connections):
             'broken': connection.status == connection.BROKEN,
             'sub': f"{len(items)} {word}{'' if len(items) == 1 else 's'} · "
                    + ('needs reconnecting' if connection.status == connection.BROKEN else 'connected'),
-            'items': items,
+            'items': items, 'groups': list(dict.fromkeys(item['group'] for item in items)),
         }
 
     return {

@@ -339,6 +339,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .pick-group.open { border: 1.5px solid #ff9fc0; background: #fff8fb; }
 .pick-events { display: flex; flex-direction: column; padding: 0 8px 8px 64px; gap: 2px; }
 .pick-events button { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 10px; border-radius: 9px; border: 0; background: transparent; color: var(--ink); font-size: 13px; font-weight: 500; text-align: left; }
+.pick-heading { margin: 10px 10px 2px; font-size: 11px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--ink-3); }
+.pick-heading:first-child { margin-top: 2px; }
 .pick-events button:hover { background: var(--rose-soft); font-weight: 700; } .pick-events .ms { font-size: 18px; color: var(--mute); } .pick-events button:hover .ms { color: var(--rose); }
 /* node editor */
 .veil { position: absolute; inset: 0; z-index: 20; background: rgba(27,16,48,.55); padding: 24px; display: flex; align-items: stretch; justify-content: center; }

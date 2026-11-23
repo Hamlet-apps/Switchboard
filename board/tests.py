@@ -945,6 +945,9 @@ class BuilderTests(Base):
         data = page.context['data']
         self.assertEqual([b['name'] for b in data['catalog']['triggers']['buildings']], ['Pavilion', 'Town Hall'])
         self.assertIn(f'action:{self.pv.pk}:staff_card.issue', data['defs'])
+        pavilion = data['catalog']['steps']['buildings'][0]
+        self.assertEqual(pavilion['groups'], ['Staff', 'Staff card', 'Shift'])
+        self.assertEqual(data['defs'][f'action:{self.pv.pk}:staff_card.issue']['group'], 'Staff card')
         self.assertEqual(data['problems'], [])
 
     def test_save_cleans_steps_and_pauses_a_broken_workflow(self):

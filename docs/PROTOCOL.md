@@ -74,6 +74,32 @@ All bodies are JSON (UTF-8). All paths below are fixed and sit outside any langu
 - `kind` is `lookup` (reads, safe to repeat) or `action` (changes something).
 - Param `type`s are the same list; a param may add `"choices": [{"value", "label"}]` and
   `"default"`. Missing optional params are simply left out of the request.
+- A param may state its limits: `"max_length"` for text, `"min"` and `"max"` for numbers.
+  Switchboard shows them next to the setting and refuses a value outside them before sending
+  anything, so say them here rather than only answering `422`.
+
+### How strictly this is held
+
+The manifest is a promise, and Switchboard checks it:
+
+- **When connecting or checking again.** A manifest it can't build steps from is refused, with
+  the reason shown to the admin: a trigger `type` or action `name` that isn't lowercase words
+  joined by dots, a duplicate, a `kind` other than `lookup` or `action`, a field or param
+  without a known `type`. Smaller slips (a missing example, an example or default of the wrong
+  type, a missing label) don't block the connection; they are listed on Switchboard's Buildings
+  page for whoever maintains the building.
+- **Before every action.** Settings are converted to each param's type and checked against its
+  limits; a value that doesn't fit fails the step in Switchboard with a plain message.
+- **After every answer, and for every event.** Declared fields that are present must be of the
+  declared type (a field that is missing or `null` is fine). A mismatch never fails a run; it
+  is listed on the Buildings page, as is an event whose `type` the manifest doesn't list.
+
+JSON types: `string` is a JSON string (ids too, even numeric ones), `int` a whole number,
+`number` and `money` a number (never text like `"10.00"`), `bool` true or false, `datetime`
+a string in ISO 8601 with an offset.
+
+Buildings should hold themselves to it as well: each has `switchboard/contract.py`, and its
+tests check every action's answer and every event it emits against its own manifest.
 - `method` is always `POST` and `path` is relative to `api_base`.
 
 ## 2. Connecting

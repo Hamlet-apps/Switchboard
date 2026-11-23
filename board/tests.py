@@ -25,9 +25,10 @@ TH_MANIFEST = {
                     {'key': 'person.email', 'type': 'string', 'example': 'maria@example.org'},
                     {'key': 'level', 'type': 'int', 'example': 3}]},
         {'type': 'shift.signed_up', 'title': 'Signed up for a shift',
-         'fields': [{'key': 'person.name', 'example': 'Ana'}, {'key': 'person.email', 'example': 'ana@example.org'},
-                    {'key': 'shift.starts_at', 'example': '2026-11-28T09:00:00-08:00'},
-                    {'key': 'shift.ends_at', 'example': '2026-11-28T12:00:00-08:00'}]},
+         'fields': [{'key': 'person.name', 'type': 'string', 'example': 'Ana'},
+                    {'key': 'person.email', 'type': 'string', 'example': 'ana@example.org'},
+                    {'key': 'shift.starts_at', 'type': 'datetime', 'example': '2026-11-28T09:00:00-08:00'},
+                    {'key': 'shift.ends_at', 'type': 'datetime', 'example': '2026-11-28T12:00:00-08:00'}]},
     ],
     'actions': [],
 }
@@ -40,22 +41,22 @@ PV_MANIFEST = {
         {'name': 'staff.find', 'kind': 'lookup', 'title': 'Find staff member', 'method': 'POST',
          'path': '/actions/staff.find',
          'params': [{'key': 'email', 'type': 'string', 'label': 'Email', 'required': True}],
-         'output': [{'key': 'found', 'type': 'bool', 'example': True}, {'key': 'staff_id', 'example': '12'}]},
+         'output': [{'key': 'found', 'type': 'bool', 'example': True}, {'key': 'staff_id', 'type': 'string', 'example': '12'}]},
         {'name': 'staff.ensure', 'kind': 'action', 'title': 'Add staff member', 'path': '/actions/staff.ensure',
          'params': [{'key': 'name', 'type': 'string', 'label': 'Name', 'required': True},
                     {'key': 'email', 'type': 'string', 'label': 'Email', 'required': True}],
-         'output': [{'key': 'staff_id', 'example': '12'}]},
+         'output': [{'key': 'staff_id', 'type': 'string', 'example': '12'}]},
         {'name': 'staff_card.issue', 'kind': 'action', 'title': 'Issue staff card', 'path': '/actions/staff_card.issue',
          'params': [{'key': 'staff_id', 'type': 'string', 'label': 'Staff member', 'required': True},
-                    {'key': 'amount', 'type': 'money', 'label': 'Amount', 'required': True},
-                    {'key': 'label', 'type': 'string', 'label': 'Card label'},
+                    {'key': 'amount', 'type': 'money', 'label': 'Amount', 'required': True, 'min': 0.01, 'max': 9999.99},
+                    {'key': 'label', 'type': 'string', 'label': 'Card label', 'max_length': 30},
                     {'key': 'replace_previous', 'type': 'bool', 'label': 'Replace their previous card'}],
-         'output': [{'key': 'card_id', 'example': '7'}, {'key': 'amount', 'example': 10.0}]},
+         'output': [{'key': 'card_id', 'type': 'string', 'example': '7'}, {'key': 'amount', 'type': 'money', 'example': 10.0}]},
         {'name': 'shift.add', 'kind': 'action', 'title': 'Add shift', 'path': '/actions/shift.add',
          'params': [{'key': 'staff_id', 'type': 'string', 'label': 'Staff member', 'required': True},
                     {'key': 'starts_at', 'type': 'datetime', 'label': 'Starts', 'required': True},
                     {'key': 'ends_at', 'type': 'datetime', 'label': 'Ends', 'required': True}],
-         'output': [{'key': 'shift_id', 'example': '3'}]},
+         'output': [{'key': 'shift_id', 'type': 'string', 'example': '3'}]},
     ],
 }
 
@@ -557,6 +558,116 @@ class BranchBuilderTests(Base):
         self.assertEqual(self.world.calls[-1]['raw'], 'false Andrew')
         whole = self.post('test', workflow, {'steps': steps}).json()
         self.assertEqual([(s['uid'], s['status']) for s in whole['steps']], [('t', 'ok'), ('i', 'ok'), ('h', 'ok')])
+
+
+class ContractTests(Base):
+    """Buildings are held to their manifest (board/schema.py)."""
+
+    find = 'https://pv.test/switchboard/v1/actions/staff.find'
+    issue = 'https://pv.test/switchboard/v1/actions/staff_card.issue'
+
+    def card_workflow(self, **params):
+        return Workflow.objects.create(name='Card', enabled=True, steps=[
+            {'uid': 't', 'node': 'event', 'connection': self.th.id, 'key': 'volunteer.level_reached', 'params': {}},
+            {'uid': 'c', 'node': 'action', 'connection': self.pv.id, 'key': 'staff_card.issue',
+             'params': {'staff_id': '12', 'amount': '10', **params}},
+        ])
+
+    def test_a_manifest_switchboard_cannot_use_is_refused_with_the_reason(self):
+        from . import schema
+        broken = json.loads(json.dumps(PV_MANIFEST))
+        broken['actions'][0]['kind'] = 'query'
+        broken['actions'][2]['params'][1]['type'] = 'dollars'
+        broken['triggers'] = [{'type': 'Order Placed', 'fields': []}]
+        errors, _notes = schema.manifest_problems(broken)
+        self.assertEqual(errors, [
+            'event "Order Placed": the type should be lowercase words joined by dots, like "shift.signed_up"',
+            'action "staff.find": "kind" should be "lookup" or "action"',
+            'action "staff_card.issue": the param "amount" has no type Switchboard knows (one of string, int, number, bool, datetime, money)',
+        ])
+        Connection.objects.all().delete()
+        self.world.on('GET', 'https://pv.test/.well-known/switchboard', (200, broken))
+        page = self.client.post(reverse('building_connect'), {'address': 'pv.test'}, follow=True)
+        self.assertContains(page, 'describes itself in a way Switchboard can&#x27;t use')
+        self.assertContains(page, '(and 2 more)')
+        self.assertEqual(Connection.objects.count(), 0)
+
+    def test_small_slips_in_a_manifest_are_kept_as_notes_not_refused(self):
+        sloppy = json.loads(json.dumps(PV_MANIFEST))
+        sloppy['actions'][2]['output'][1]['example'] = '10.00'           # a money example given as text
+        del sloppy['actions'][0]['output'][1]['example']
+        Connection.objects.all().delete()
+        self.world.on('GET', 'https://pv.test/.well-known/switchboard', (200, sloppy))
+        self.client.post(reverse('building_connect'), {'address': 'pv.test'})
+        connection = Connection.objects.get()
+        self.assertEqual(connection.contract_notes, [
+            'action "staff.find": the field "staff_id" has no example',
+            'action "staff_card.issue": the example for "amount" should be a number',
+        ])
+        Connection.objects.update(status=Connection.CONNECTED)
+        self.assertContains(self.client.get(reverse('buildings')), '2 things that don&#x27;t match what Pavilion says about itself')
+
+    def test_settings_outside_a_params_limits_never_leave_switchboard(self):
+        workflow = self.card_workflow(label='Meal card for {{t.person.name}} of the cathedral kitchen')
+        self.deliver(self.th, self.level_event())
+        self.assertEqual(workflow.runs.get().error, 'Card label can be at most 30 characters (this is 47).')
+        self.assertEqual(self.world.to(self.issue), [])
+        workflow.steps[1]['params'].update(label='Meal card', amount='{{t.level}}00000')
+        workflow.save()
+        self.deliver(self.th, self.level_event(event_id='evt_2'))
+        self.assertEqual(workflow.runs.first().error, 'Amount should be at most 9999.99.')
+        self.assertEqual(self.world.to(self.issue), [])
+
+    def test_typed_in_settings_are_checked_before_the_workflow_can_be_switched_on(self):
+        connections = {self.th.id: self.th, self.pv.id: self.pv}
+        problems = lambda **params: nodes.problems(self.card_workflow(**params).steps, connections)  # noqa: E731
+        self.assertEqual(problems(label='Volunteer meal card'), [])
+        self.assertEqual(problems(label='A label that is much too long to be a card type name'),
+                         ['"Issue staff card": card label can be at most 30 characters (this is 52).'])
+        self.assertEqual(problems(amount='ten'), ['"Issue staff card": amount "ten" is not a number.'])
+        self.assertEqual(problems(amount='0'), ['"Issue staff card": amount should be at least 0.01.'])
+        self.assertEqual(problems(amount='{{t.level}}'), [])              # a field: checked when it runs
+        page = self.client.get(reverse('builder', args=[self.card_workflow().pk]))
+        helps = {p['key']: p['help'] for p in page.context['data']['defs'][f'action:{self.pv.pk}:staff_card.issue']['params']}
+        self.assertEqual((helps['label'], helps['amount']), ('At most 30 characters.', 'Between 0.01 and 9999.99.'))
+
+    def test_an_answer_that_breaks_the_manifest_is_noted_but_the_run_goes_on(self):
+        workflow = self.card_workflow()
+        self.world.on('POST', self.issue, (200, {'card_id': 7, 'amount': '10.00'}))
+        self.deliver(self.th, self.level_event())
+        self.assertEqual(workflow.runs.get().status, Run.SUCCEEDED)
+        self.pv.refresh_from_db()
+        self.assertEqual(self.pv.contract_notes, [
+            '"Issue staff card" answered differently from its manifest: "card_id" should be text, but was 7',
+            '"Issue staff card" answered differently from its manifest: "amount" should be a number, but was \'10.00\'',
+        ])
+        self.deliver(self.th, self.level_event(event_id='evt_2'))
+        self.pv.refresh_from_db()
+        self.assertEqual(len(self.pv.contract_notes), 2)                   # the same note isn't kept twice
+
+    def test_events_are_checked_against_the_manifest_too(self):
+        event = self.level_event()
+        event['data']['level'] = 'three'
+        self.deliver(self.th, event)
+        self.deliver(self.th, {'id': 'evt_x', 'type': 'volunteer.vanished', 'data': {}})
+        self.th.refresh_from_db()
+        self.assertEqual(self.th.contract_notes, [
+            'The event "volunteer.level_reached" came differently from its manifest: "level" should be a whole number, but was \'three\'',
+            'It sent an event its manifest does not list: "volunteer.vanished"',
+        ])
+        self.world.on('GET', 'https://th.test/.well-known/switchboard', (200, TH_MANIFEST))
+        self.world.on('GET', 'https://th.test/switchboard/v1/', (200, {'ok': True}))
+        self.client.post(reverse('building_refresh', args=[self.th.pk]))
+        self.th.refresh_from_db()
+        self.assertEqual(self.th.contract_notes, [])                        # checking again starts clean
+
+    def test_value_types(self):
+        from .schema import type_error
+        for value, kind in (('x', 'string'), (3, 'int'), (3, 'number'), (2.5, 'money'), (False, 'bool'),
+                            ('2026-11-19T16:20:04-08:00', 'datetime'), ('2026-11-19T16:20:04Z', 'datetime')):
+            self.assertEqual(type_error(value, kind), '', (value, kind))
+        for value, kind in ((3, 'string'), (True, 'int'), (2.5, 'int'), ('3', 'number'), (1, 'bool'), ('tomorrow', 'datetime')):
+            self.assertNotEqual(type_error(value, kind), '', (value, kind))
 
 
 class HookTests(Base):

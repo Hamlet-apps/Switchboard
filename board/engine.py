@@ -14,7 +14,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from . import buildings, nodes, templating
+from . import buildings, nodes, schema, templating
 from .buildings import BuildingError
 from .models import Connection, Event, Run, RunStep, Secret, Settings, Workflow
 
@@ -126,8 +126,11 @@ def perform(step, definition, ctx, connections, secrets, dedupe):
     if node == 'action':
         connection = connections[step['connection']]
         action = connection.action(step['key'])
+        schema.check_params(definition, values)
         key = '' if definition.get('lookup') else idempotency_key(dedupe, step['uid'])
         output = buildings.call_action(connection, action, values, key)
+        schema.remember(connection, [f'"{definition["title"]}" answered differently from its manifest: {wrong}'
+                                     for wrong in schema.mismatches(definition['out'], output)])
         return output, values, connection.name
     raise BuildingError("This step can't run here.")
 
@@ -315,6 +318,11 @@ def receive_event(connection, envelope):
     except IntegrityError:
         return None, []
     Connection.objects.filter(pk=connection.pk).update(last_event_at=timezone.now())
+    if trigger is None:
+        schema.remember(connection, [f'It sent an event its manifest does not list: "{type_}"'])
+    else:
+        schema.remember(connection, [f'The event "{type_}" came differently from its manifest: {wrong}'
+                                     for wrong in schema.mismatches(trigger.get('fields'), data)])
     runs = []
     for workflow in listeners(connection, type_):
         run = start_run(workflow, data, event.summary, event=event)

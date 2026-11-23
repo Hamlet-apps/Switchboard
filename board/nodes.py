@@ -117,8 +117,23 @@ def _builtin(node):
 
 
 def _fields(items):
-    return [{'key': str(f['key']), 'example': f.get('example')} for f in items or []
+    return [{'key': str(f['key']), 'type': str(f.get('type') or ''), 'example': f.get('example')} for f in items or []
             if isinstance(f, dict) and f.get('key')]
+
+
+def _limits(spec):
+    """A param's limits in words, added to its help so people see them before they hit them."""
+    words = []
+    if isinstance(spec.get('max_length'), (int, float)):
+        words.append(f"At most {int(spec['max_length'])} characters.")
+    low, high = spec.get('min'), spec.get('max')
+    if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+        words.append(f'Between {low:g} and {high:g}.')
+    elif isinstance(low, (int, float)):
+        words.append(f'At least {low:g}.')
+    elif isinstance(high, (int, float)):
+        words.append(f'At most {high:g}.')
+    return ' '.join(words)
 
 
 def _param(spec):
@@ -126,8 +141,12 @@ def _param(spec):
     out = {
         'key': str(spec['key']), 'label': str(spec.get('label') or spec['key']),
         'type': 'choice' if choices else str(spec.get('type') or 'string'),
-        'required': bool(spec.get('required')), 'help': str(spec.get('help') or ''),
+        'required': bool(spec.get('required')),
+        'help': ' '.join(part for part in (str(spec.get('help') or ''), _limits(spec)) if part),
     }
+    for limit in ('min', 'max', 'max_length'):
+        if isinstance(spec.get(limit), (int, float)) and not isinstance(spec.get(limit), bool):
+            out[limit] = spec[limit]
     if choices:
         out['choices'] = [{'value': c['value'], 'label': str(c.get('label', c['value']))} for c in choices]
         out['value_type'] = str(spec.get('type') or 'string')
@@ -391,6 +410,11 @@ def problems(steps, connections):
         for param in definition['params']:
             if param.get('required') and visible(param, values) and is_empty(values.get(param['key'])):
                 found.append(f'"{definition["title"]}" needs {param["label"].lower()}.')
+            elif step.get('node') == 'action' and visible(param, values):
+                from . import schema
+                wrong = schema.literal_problem(param, values.get(param['key']))
+                if wrong:
+                    found.append(f'"{definition["title"]}": {param["label"].lower()} {wrong}.')
         if step.get('node') == 'switch':
             for case in step.get('cases') or []:
                 if is_empty(case.get('value')):

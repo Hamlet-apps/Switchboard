@@ -252,7 +252,7 @@ and `staff.id|name|email` or `customer.name|email` in Pavilion; ids are strings;
 answers `found`, and one that can match several answers `count`, the first match in full, and the matches as a
 list a workflow can loop over.
 
-### Town Hall (`town-hall`): 43 events, 36 actions
+### Town Hall (`town-hall`): 43 events, 40 actions
 
 - **People**: registered, level reached, profile completed, email changed, deactivated or
   reactivated, role assigned or unassigned, points awarded, endorsement given. Find, search,
@@ -273,7 +273,7 @@ list a workflow can loop over.
 Recipes use: trigger `volunteer.level_reached` (`person.email`, `person.name`, `level`),
 trigger `shift.signed_up` (`person.name`, `person.email`, `shift.starts_at`, `shift.ends_at`).
 
-### Pavilion (`pavilion`): 60 events, 33 actions
+### Pavilion (`pavilion`): 60 events, 43 actions
 
 - **Orders**: placed, approved, a station done, ready, picked up, rejected, refunded, discount
   used; deliveries assigned, picked up, delivered. Find an order, send its receipt, a day's
